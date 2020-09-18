@@ -13,7 +13,7 @@ Some back of the napkin estimations:
   - Google gives you $200 of free credit every month
   - The [Streetview static API](https://developers.google.com/maps/documentation/streetview/) costs $0.007 per frame
   - In the densest areas we can download about 200 images per mile
-  - This lets you render up to **300** miles per month for free
+  - This lets you render about **150** miles per month for free
    
 To **avoid hitting your API quota**, pass in the `--dry-run` option!
 
