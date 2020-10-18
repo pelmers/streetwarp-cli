@@ -7,6 +7,7 @@ extern crate serde_derive;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
@@ -19,6 +20,8 @@ use structopt::StructOpt;
 use futures::{stream, StreamExt};
 use rayon::prelude::*;
 use reqwest::Client;
+use serde_json::json;
+use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 
 /*
@@ -62,22 +65,34 @@ struct Cli {
 
     /// Number of frames to search for per mile, default: 100.
     #[structopt(short, long)]
-    frames_per_mile: Option<usize>,
+    frames_per_mile: Option<f64>,
+
+    /// Maximum number of frames, default: unlimited (set to 0)
+    #[structopt(long)]
+    max_frames: Option<usize>,
 
     /// Don't fetch images or create video, just show metadata and expected error.
     #[structopt(short, long)]
     dry_run: bool,
 
-    /// Linearly interpolate given number of points between each point in the source file, default: off.
+    /// Linearly interpolate given number of points between each point in the source file, default: use frames_per_mile.
     #[structopt(long)]
     interp: Option<usize>,
+
+    /// Use motion interpolation to smooth output video. Available: skip, fast, good. Default: good
+    #[structopt(long)]
+    minterp: Option<String>,
 
     /// Output in JSON format. Default: off.
     #[structopt(long)]
     json: bool,
+
+    /// Whether to print out progress messages (in JSON) to stdout. Default: off.
+    #[structopt(long)]
+    progress: bool,
 }
 
-#[derive(Deserialize, Debug, Copy, Clone, Default, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Copy, Clone, Default, PartialEq)]
 struct GSVPoint {
     lat: f64,
     lng: f64,
@@ -108,6 +123,13 @@ struct PointBearing {
     bearing: f64,
 }
 
+#[derive(Serialize, Debug, Clone)]
+struct MetadataResult {
+    distance: f64,
+    frames: usize,
+    gpsPoints: Vec<GSVPoint>,
+    averageError: f64,
+}
 // TODO hook up to some sort of web app that gets the route from strava
 
 async fn get_images<P: AsRef<Path>>(point_bearings: &[PointBearing], out_dir: &P) {
@@ -135,6 +157,34 @@ async fn get_images<P: AsRef<Path>>(point_bearings: &[PointBearing], out_dir: &P
             tokio::fs::write(filename, bytes.unwrap()).await.unwrap();
         })
         .await;
+}
+
+fn progress(msg: &str) {
+    if !CLI_OPTIONS.progress {
+        return;
+    }
+    println!(
+        "{}",
+        serde_json::to_string(&json!({
+            "type": "PROGRESS",
+            "message": msg,
+        }))
+        .expect("Could not print progress message")
+    );
+}
+
+fn progress_stage(stage: &str) {
+    if !CLI_OPTIONS.progress {
+        return;
+    }
+    println!(
+        "{}",
+        serde_json::to_string(&json!({
+            "type": "PROGRESS_STAGE",
+            "stage": stage,
+        }))
+        .expect("Could not print progress message")
+    );
 }
 
 async fn get_metadata(point_bearings: &[PointBearing]) -> Vec<GSVMetadata> {
@@ -172,81 +222,82 @@ async fn get_metadata(point_bearings: &[PointBearing]) -> Vec<GSVMetadata> {
         .collect::<Vec<_>>()
 }
 
-async fn create_timelapse<P: AsRef<Path>>(image_dir: P) {
-    // ffmpeg -framerate 30 -pattern_type glob -i "folder-with-photos/*.JPG" -s:v 1440x1080 -c:v libx264 -crf 25 -pix_fmt yuv420p my-timelapse.mp4
-    let args = [
-        "-framerate",
-        "15",
-        "-pattern_type",
-        "sequence",
-        "-i",
-        "%d.jpg",
-        "-s:v",
-        "640x480",
-        "-c:v",
-        "libx264",
-        "-crf",
-        "17",
-        "-pix_fmt",
-        "yuv420p",
-        "-preset",
-        "ultrafast",
-        "-y",
-        &format!(
-            "{}-original.mp4",
-            &CLI_OPTIONS
-                .output
-                .clone()
-                .unwrap_or("streetwarp-lapse".to_string())
-        ),
-    ];
-    eprintln!("ffmpeg {:?}", args);
-    let output = Command::new("ffmpeg")
-        .args(args.iter())
-        .current_dir(image_dir)
-        .output()
-        .await
-        .unwrap();
-    eprintln!("out: {}", String::from_utf8(output.stdout).unwrap());
-    eprintln!("err: {}", String::from_utf8(output.stderr).unwrap());
+async fn ffmpeg<P: AsRef<Path>>(working_dir: P, args: &[&str]) {
+    let mut command = Command::new("ffmpeg");
+    let command = command
+        .args(args)
+        .current_dir(working_dir)
+        .stdout(Stdio::piped());
+    let mut child = command.spawn().expect("ffmpeg spawn failure");
+    let stdout = child.stdout.take().expect("ffmpeg stdout failure");
+    let mut reader = tokio::io::BufReader::new(stdout).lines();
+    // Ensure the child process is spawned in the runtime so it can
+    // make progress on its own while we await for any output.
+    let thread = tokio::spawn(async {
+        child.await.expect("child process encountered an error");
+    });
+
+    while let Some(line) = reader.next_line().await.expect("ffmpeg readline failure") {
+        // TODO print out progress messages if it starts with 'frame='
+        // println!("Line: {}", line);
+    }
+    thread.await.expect("Failed to join ffmpeg thread");
 }
 
-async fn minterp_timelapse<P: AsRef<Path>>(image_dir: P) {
+async fn create_timelapse<P: AsRef<Path>>(image_dir: P, out_filename: &str) {
+    // ffmpeg -framerate 30 -pattern_type glob -i "folder-with-photos/*.JPG" -s:v 1440x1080 -c:v libx264 -crf 25 -pix_fmt yuv420p my-timelapse.mp4
+    ffmpeg(
+        image_dir,
+        &[
+            "-framerate",
+            "15",
+            "-pattern_type",
+            "sequence",
+            "-i",
+            "%d.jpg",
+            "-s:v",
+            "640x480",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "17",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "ultrafast",
+            "-y",
+            out_filename,
+        ],
+    )
+    .await;
+}
+
+async fn minterp_timelapse<P: AsRef<Path>>(
+    image_dir: P,
+    original_filename: &str,
+    out_filename: &str,
+) {
     // ffmpeg -i streetwarp-lapse24.mp4 -filter:v "minterpolate='mi_mode=mci:mc_mode=aobmc:vsbmc=1:fps=50'" -c:v libx264 -crf 17 -pix_fmt yuv420p -y -preset ultrafast streetwarp-lapse24_flow.mp4
-    let args = [
-        "-i",
-        &format!(
-            "{}-original.mp4",
-            &CLI_OPTIONS
-                .output
-                .clone()
-                .unwrap_or("streetwarp-lapse".to_string())
-        ),
-        "-filter:v",
-        "minterpolate='mi_mode=mci:mc_mode=aobmc:vsbmc=1:fps=30'",
-        "-c:v",
-        "libx264",
-        "-crf",
-        "17",
-        "-pix_fmt",
-        "yuv420p",
-        "-preset",
-        "ultrafast",
-        "-y",
-        &CLI_OPTIONS
-            .output
-            .clone()
-            .unwrap_or("streetwarp-lapse.mp4".to_string()),
-    ];
-    eprintln!("ffmpeg {:?}", args);
-    let output = Command::new("ffmpeg")
-        .args(args.iter())
-        .current_dir(image_dir)
-        .output()
-        .await
-        .unwrap();
-    eprintln!("out: {}", String::from_utf8(output.stdout).unwrap());
-    eprintln!("err: {}", String::from_utf8(output.stderr).unwrap());
+    ffmpeg(
+        image_dir,
+        &[
+            "-i",
+            original_filename,
+            "-filter:v",
+            "minterpolate='mi_mode=mci:mc_mode=aobmc:vsbmc=1:fps=30'",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "17",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "ultrafast",
+            "-y",
+            out_filename,
+        ],
+    )
+    .await;
 }
 
 fn group_by_location(
@@ -296,7 +347,7 @@ fn interp_points(points: Vec<Point<f64>>, factor: usize) -> Vec<Point<f64>> {
             .zip(points.iter().skip(1))
             .flat_map(|(p1, p2)| {
                 // technically this changes the paths just a little bit? since 1 lat != 1 lng
-                // TODO make it correct by taking into account bearings
+                // TODO make it correct by taking into account distances correctly
                 let x_step = (p2.lng() - p1.lng()) / (factor as f64);
                 let y_step = (p2.lat() - p1.lat()) / (factor as f64);
                 (0..factor).map(move |i| {
@@ -368,6 +419,8 @@ async fn main() {
     let reader = BufReader::new(file);
 
     // read takes any io::Read and gives a Result<Gpx, Error>.
+    progress_stage("Parsing GPX data");
+    progress("Reading GPX file");
     let gpx: Gpx = read(reader).unwrap();
     let all_points = gpx
         .tracks
@@ -387,6 +440,7 @@ async fn main() {
         .flatten()
         .collect::<Vec<_>>();
 
+    progress("Computing distance statistics");
     let distances = find_distances(&all_points);
     let distance = distances.iter().sum::<f64>();
     if !CLI_OPTIONS.json {
@@ -405,12 +459,14 @@ async fn main() {
             env::temp_dir().join(format!("streetwarp-tmp-{}", now.as_secs()))
         });
     fs::create_dir_all(&output_dir).expect("Could not open output directory");
-    println!("output dir is {}", output_dir.to_string_lossy());
+    if !CLI_OPTIONS.json {
+        println!("output dir is {}", output_dir.to_string_lossy());
+    }
 
     // interpolate extra points to have more closely spaced pictures
     // from my observation it looks like Google can give back up to 300 points per mile
     let expected_frames =
-        (CLI_OPTIONS.frames_per_mile.unwrap_or(100) as f64 * distance / 1600.0) as usize;
+        (CLI_OPTIONS.frames_per_mile.unwrap_or(100.0) * distance / 1600.0) as usize;
     let all_points = interp_points(
         all_points,
         CLI_OPTIONS
@@ -419,13 +475,15 @@ async fn main() {
     );
     let distances = find_distances(&all_points);
 
+    progress("Finding viewpoints");
     let points = find_bearings(&sample_points_by_distance(
         &all_points,
         expected_frames,
         &distances,
     ));
+    progress_stage("Fetching Streetview metadata");
     let metadata = get_metadata(&points).await;
-    let (points, metadata, errs) = group_by_location(points, metadata);
+    let (mut points, metadata, errs) = group_by_location(points, metadata);
 
     if !CLI_OPTIONS.json {
         println!(
@@ -440,30 +498,84 @@ async fn main() {
         );
     }
     if CLI_OPTIONS.dry_run {
-        for (index, (point, meta)) in points.iter().zip(metadata.iter()).enumerate() {
-            let expected = point.point;
-            if meta.status == "OK" {
-                let actual = Point::new(meta.location.lng, meta.location.lat);
-                let err = actual.geodesic_distance(&expected);
-                println!("{},{},{},{}", index, err, meta.date, meta.pano_id);
-            }
+        let gps_points = metadata
+            .iter()
+            .map(|data| data.location)
+            .collect::<Vec<_>>();
+
+        let metadata_result = MetadataResult {
+            distance: distances.iter().sum::<f64>(),
+            frames: gps_points.len(),
+            averageError: errs.iter().sum::<f64>() / errs.len() as f64,
+            gpsPoints: gps_points,
+        };
+        if CLI_OPTIONS.json {
+            println!(
+                "{}",
+                serde_json::to_string(&metadata_result).expect("Serialization failed")
+            );
+        } else {
+            println!("{:?}", &metadata_result);
         }
         return;
     }
     // TODO create line and put it on a google map?
     // or an open street map... https://leafletjs.com/reference-1.7.1.html#polyline
 
+    if CLI_OPTIONS.max_frames.unwrap_or(0) > 0 {
+        points.truncate(CLI_OPTIONS.max_frames.unwrap());
+    }
     get_images(&points, &output_dir).await;
 
     // TODO dynamic program images to remove bigtime outliers (like hyperlapse does)
+    // 640 x 480 x 3 = about 1.6 MB per image to keep in memory
     // cost function could be some histogram operation? (maybe use hue?)
 
-    create_timelapse(&output_dir).await;
+    let original_timelapse_name = format!(
+        "{}-original.mp4",
+        &CLI_OPTIONS
+            .output
+            .clone()
+            .unwrap_or("streetwarp-lapse".to_string())
+    );
 
-    minterp_timelapse(&output_dir).await;
+    create_timelapse(&output_dir, &original_timelapse_name).await;
+    let output_timelapse_name = &CLI_OPTIONS
+        .output
+        .clone()
+        .unwrap_or("streetwarp-lapse.mp4".to_string());
+
+    match CLI_OPTIONS
+        .minterp
+        .clone()
+        .unwrap_or("good".to_string())
+        .as_str()
+    {
+        "skip" => {
+            // TODO rename 'original' to 'output'
+        }
+        // TODO add option for faster interp (blending)
+        "fast" => {
+            minterp_timelapse(
+                &output_dir,
+                &original_timelapse_name,
+                &output_timelapse_name,
+            )
+            .await
+        }
+        _ => {
+            minterp_timelapse(
+                &output_dir,
+                &original_timelapse_name,
+                &output_timelapse_name,
+            )
+            .await
+        }
+    };
 
     // TODO optionally stabilize the output
-    // TODO json output
+    // TODO json output:
+    // output filename, list of streetview points (one per frame)
 
     // TODO in javascript animate map position while video plays!
 }
