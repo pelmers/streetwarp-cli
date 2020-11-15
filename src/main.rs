@@ -75,6 +75,10 @@ struct Cli {
     #[structopt(short, long)]
     dry_run: bool,
 
+    /// Save metadata as JSON to `${CLI_OPTIONS.output}.json`
+    #[structopt(long)]
+    save_metadata: bool,
+
     /// Linearly interpolate given number of points between each point in the source file, default: use frames_per_mile.
     #[structopt(long)]
     interp: Option<usize>,
@@ -130,12 +134,10 @@ struct MetadataResult {
     gpsPoints: Vec<GSVPoint>,
     averageError: f64,
 }
-// TODO hook up to some sort of web app that gets the route from strava
 
 async fn get_images<P: AsRef<Path>>(point_bearings: &[PointBearing], out_dir: &P) {
     // and to correct points lat/lng
     // and to skip images that are a copy of the previous one
-    // TODO add api request limits (about 15,000 monthly?)
     let url = |point_bearing: &PointBearing| {
         format!(
 "https://maps.googleapis.com/maps/api/streetview?size=640x480&location={},{}&fov=120&source=outdoor&heading={}&pitch=0&key={}", point_bearing.point.lat(), point_bearing.point.lng(), point_bearing.bearing, CLI_OPTIONS.api_key)
@@ -188,10 +190,9 @@ fn progress_stage(stage: &str) {
 }
 
 async fn get_metadata(point_bearings: &[PointBearing]) -> Vec<GSVMetadata> {
-    // TODO use metadata requests to skip errors https://developers.google.com/maps/documentation/streetview/metadata
+    // use metadata requests to skip errors https://developers.google.com/maps/documentation/streetview/metadata
     // and to correct points lat/lng
     // and to skip images that are a copy of the previous one
-    // TODO add api request limits (about 15,000 monthly?)
     let url = |point_bearing: &PointBearing| {
         format!(
 "https://maps.googleapis.com/maps/api/streetview/metadata?location={},{}&source=outdoor&key={}", point_bearing.point.lat(), point_bearing.point.lng(), CLI_OPTIONS.api_key)
@@ -238,8 +239,10 @@ async fn ffmpeg<P: AsRef<Path>>(working_dir: P, args: &[&str]) {
     });
 
     while let Some(line) = reader.next_line().await.expect("ffmpeg readline failure") {
-        // TODO print out progress messages if it starts with 'frame='
-        // println!("Line: {}", line);
+        if line.contains("frame=") {
+            let frame = &line["frame=".len()..];
+            progress(&format!("{} frames rendered", frame));
+        }
     }
     thread.await.expect("Failed to join ffmpeg thread");
 }
@@ -250,7 +253,7 @@ async fn create_timelapse<P: AsRef<Path>>(image_dir: P, out_filename: &str) {
         image_dir,
         &[
             "-framerate",
-            "15",
+            "8",
             "-pattern_type",
             "sequence",
             "-i",
@@ -265,6 +268,8 @@ async fn create_timelapse<P: AsRef<Path>>(image_dir: P, out_filename: &str) {
             "yuv420p",
             "-preset",
             "ultrafast",
+            "-progress",
+            "pipe:1",
             "-y",
             out_filename,
         ],
@@ -272,6 +277,37 @@ async fn create_timelapse<P: AsRef<Path>>(image_dir: P, out_filename: &str) {
     .await;
 }
 
+async fn blend_timelapse<P: AsRef<Path>>(
+    image_dir: P,
+    original_filename: &str,
+    out_filename: &str,
+) {
+    // ffmpeg -i streetwarp.mp4-original.mp4 -filter_complex "[0:v]minterpolate=fps=48.0,tblend=all_mode=average,framestep=2[out]" -map "[out]" -c:v libx264 -crf 17 -pix_fmt yuv420p -y -preset ultrafast -progress streetwarp-lapse24_blur.mp4
+    ffmpeg(
+        image_dir,
+        &[
+            "-i",
+            original_filename,
+            "-filter_complex",
+            "[0:v]minterpolate=fps=48,tblend=all_mode=average,framestep=2[out]",
+            "-map",
+            "[out]",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "17",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "ultrafast",
+            "-progress",
+            "pipe:1",
+            "-y",
+            out_filename,
+        ],
+    )
+    .await;
+}
 async fn minterp_timelapse<P: AsRef<Path>>(
     image_dir: P,
     original_filename: &str,
@@ -284,7 +320,7 @@ async fn minterp_timelapse<P: AsRef<Path>>(
             "-i",
             original_filename,
             "-filter:v",
-            "minterpolate='mi_mode=mci:mc_mode=aobmc:vsbmc=1:fps=30'",
+            "minterpolate='mi_mode=mci:mc_mode=aobmc:vsbmc=1:fps=24'",
             "-c:v",
             "libx264",
             "-crf",
@@ -293,6 +329,8 @@ async fn minterp_timelapse<P: AsRef<Path>>(
             "yuv420p",
             "-preset",
             "ultrafast",
+            "-progress",
+            "pipe:1",
             "-y",
             out_filename,
         ],
@@ -345,18 +383,27 @@ fn interp_points(points: Vec<Point<f64>>, factor: usize) -> Vec<Point<f64>> {
         points
             .iter()
             .zip(points.iter().skip(1))
-            .flat_map(|(p1, p2)| {
-                // technically this changes the paths just a little bit? since 1 lat != 1 lng
-                // TODO make it correct by taking into account distances correctly
-                let x_step = (p2.lng() - p1.lng()) / (factor as f64);
-                let y_step = (p2.lat() - p1.lat()) / (factor as f64);
-                (0..factor).map(move |i| {
-                    Point::new(
-                        p1.lng() + x_step * (i as f64),
-                        p1.lat() + y_step * (i as f64),
+            .flat_map(
+                |(p1, p2)| {
+                    p1.haversine_intermediate_fill(
+                        p2,
+                        p1.haversine_distance(p2) / (factor as f64),
+                        /* include ends */ false,
                     )
-                })
-            })
+                    .into_iter()
+                }, /*
+                   // technically this changes the paths just a little bit? since 1 lat != 1 lng
+                   // TODO make it correct by taking into account distances correctly
+                   let x_step = (p2.lng() - p1.lng()) / (factor as f64);
+                   let y_step = (p2.lat() - p1.lat()) / (factor as f64);
+                   (0..factor).map(move |i| {
+                       Point::new(
+                           p1.lng() + x_step * (i as f64),
+                           p1.lat() + y_step * (i as f64),
+                       )
+                   })
+                   */
+            )
             .collect::<Vec<_>>()
     }
 }
@@ -497,18 +544,18 @@ async fn main() {
             errs.iter().sum::<f64>() / errs.len() as f64
         );
     }
-    if CLI_OPTIONS.dry_run {
-        let gps_points = metadata
-            .iter()
-            .map(|data| data.location)
-            .collect::<Vec<_>>();
+    let gps_points = metadata
+        .iter()
+        .map(|data| data.location)
+        .collect::<Vec<_>>();
 
-        let metadata_result = MetadataResult {
-            distance: distances.iter().sum::<f64>(),
-            frames: gps_points.len(),
-            averageError: errs.iter().sum::<f64>() / errs.len() as f64,
-            gpsPoints: gps_points,
-        };
+    let metadata_result = MetadataResult {
+        distance: distances.iter().sum::<f64>(),
+        frames: gps_points.len(),
+        averageError: errs.iter().sum::<f64>() / errs.len() as f64,
+        gpsPoints: gps_points,
+    };
+    if CLI_OPTIONS.dry_run {
         if CLI_OPTIONS.json {
             println!(
                 "{}",
@@ -519,8 +566,6 @@ async fn main() {
         }
         return;
     }
-    // TODO create line and put it on a google map?
-    // or an open street map... https://leafletjs.com/reference-1.7.1.html#polyline
 
     if CLI_OPTIONS.max_frames.unwrap_or(0) > 0 {
         points.truncate(CLI_OPTIONS.max_frames.unwrap());
@@ -539,6 +584,7 @@ async fn main() {
             .unwrap_or("streetwarp-lapse".to_string())
     );
 
+    progress_stage("Joining images into video sequence");
     create_timelapse(&output_dir, &original_timelapse_name).await;
     let output_timelapse_name = &CLI_OPTIONS
         .output
@@ -552,11 +598,12 @@ async fn main() {
         .as_str()
     {
         "skip" => {
-            // TODO rename 'original' to 'output'
+            let result = tokio::fs::rename(&original_timelapse_name, &output_timelapse_name).await;
+            result.expect("Could not rename video files");
         }
-        // TODO add option for faster interp (blending)
         "fast" => {
-            minterp_timelapse(
+            progress_stage("Blending frames to apply blur");
+            blend_timelapse(
                 &output_dir,
                 &original_timelapse_name,
                 &output_timelapse_name,
@@ -564,6 +611,7 @@ async fn main() {
             .await
         }
         _ => {
+            progress_stage("Interpolating motion to apply blur");
             minterp_timelapse(
                 &output_dir,
                 &original_timelapse_name,
@@ -572,12 +620,14 @@ async fn main() {
             .await
         }
     };
+    if CLI_OPTIONS.save_metadata {
+        let metadata_file = fs::File::create(&format!("{}.json", &output_timelapse_name)).expect("File open failed");
+        serde_json::to_writer(&metadata_file, &metadata_result).expect("Serialization failed");
+    }
 
     // TODO optionally stabilize the output
     // TODO json output:
     // output filename, list of streetview points (one per frame)
-
-    // TODO in javascript animate map position while video plays!
 }
 
 // butterr but slow
