@@ -43,9 +43,9 @@ https://maps.googleapis.com/maps/api/streetview?size=400x400&location=47.5763831
 
 #[derive(StructOpt)]
 struct Cli {
-    /// The path to the file to read
+    /// The path to the file to read, accepts .gpx and .json (format: [{lat, lng}]) files
     #[structopt(parse(from_os_str))]
-    gpx_path: PathBuf,
+    input_path: PathBuf,
 
     /// Key for google streetview static API
     #[structopt(long)]
@@ -75,9 +75,9 @@ struct Cli {
     #[structopt(short, long)]
     dry_run: bool,
 
-    /// Save metadata as JSON to `${CLI_OPTIONS.output}.json`
+    /// Print metadata before creating result video (implied if --dry-run)
     #[structopt(long)]
-    save_metadata: bool,
+    print_metadata: bool,
 
     /// Linearly interpolate given number of points between each point in the source file, default: use frames_per_mile.
     #[structopt(long)]
@@ -132,6 +132,7 @@ struct MetadataResult {
     distance: f64,
     frames: usize,
     gpsPoints: Vec<GSVPoint>,
+    originalPoints: Vec<GSVPoint>,
     averageError: f64,
 }
 
@@ -223,7 +224,8 @@ async fn get_metadata(point_bearings: &[PointBearing]) -> Vec<GSVMetadata> {
         .collect::<Vec<_>>()
 }
 
-async fn ffmpeg<P: AsRef<Path>>(working_dir: P, args: &[&str]) {
+type GetProgress = dyn Fn(usize) -> f64;
+async fn ffmpeg<P: AsRef<Path>>(working_dir: P, get_progress: &GetProgress, args: &[&str]) {
     let mut command = Command::new("ffmpeg");
     let command = command
         .args(args)
@@ -240,17 +242,19 @@ async fn ffmpeg<P: AsRef<Path>>(working_dir: P, args: &[&str]) {
 
     while let Some(line) = reader.next_line().await.expect("ffmpeg readline failure") {
         if line.contains("frame=") {
-            let frame = &line["frame=".len()..];
-            progress(&format!("{} frames rendered", frame));
+            let frame =
+                str::parse::<usize>(&line["frame=".len()..]).expect("Could not parse frame");
+            progress(&format!("{:.1}% rendered", get_progress(frame)));
         }
     }
     thread.await.expect("Failed to join ffmpeg thread");
 }
 
-async fn create_timelapse<P: AsRef<Path>>(image_dir: P, out_filename: &str) {
+async fn create_timelapse<P: AsRef<Path>>(image_dir: P, num_images: usize, out_filename: &str) {
     // ffmpeg -framerate 30 -pattern_type glob -i "folder-with-photos/*.JPG" -s:v 1440x1080 -c:v libx264 -crf 25 -pix_fmt yuv420p my-timelapse.mp4
     ffmpeg(
         image_dir,
+        &(move |frame| 100.0 * (frame as f64) / (num_images as f64)),
         &[
             "-framerate",
             "8",
@@ -279,17 +283,20 @@ async fn create_timelapse<P: AsRef<Path>>(image_dir: P, out_filename: &str) {
 
 async fn blend_timelapse<P: AsRef<Path>>(
     image_dir: P,
+    num_images: usize,
     original_filename: &str,
     out_filename: &str,
 ) {
     // ffmpeg -i streetwarp.mp4-original.mp4 -filter_complex "[0:v]minterpolate=fps=48.0,tblend=all_mode=average,framestep=2[out]" -map "[out]" -c:v libx264 -crf 17 -pix_fmt yuv420p -y -preset ultrafast -progress streetwarp-lapse24_blur.mp4
     ffmpeg(
         image_dir,
+        &(move |frame| 33.3 * (frame as f64) / (num_images as f64)),
+        // TODO use tmix filter: https://video.stackexchange.com/a/26260
         &[
             "-i",
             original_filename,
             "-filter_complex",
-            "[0:v]minterpolate=fps=48,tblend=all_mode=average,framestep=2[out]",
+            "[0:v]minterpolate=fps=24,tblend=all_mode=average,framestep=3[out]",
             "-map",
             "[out]",
             "-c:v",
@@ -308,14 +315,17 @@ async fn blend_timelapse<P: AsRef<Path>>(
     )
     .await;
 }
+
 async fn minterp_timelapse<P: AsRef<Path>>(
     image_dir: P,
+    num_images: usize,
     original_filename: &str,
     out_filename: &str,
 ) {
     // ffmpeg -i streetwarp-lapse24.mp4 -filter:v "minterpolate='mi_mode=mci:mc_mode=aobmc:vsbmc=1:fps=50'" -c:v libx264 -crf 17 -pix_fmt yuv420p -y -preset ultrafast streetwarp-lapse24_flow.mp4
     ffmpeg(
         image_dir,
+        &(move |frame| 33.3 * (frame as f64) / (num_images as f64)),
         &[
             "-i",
             original_filename,
@@ -458,19 +468,9 @@ fn find_bearings(points: &[Point<f64>]) -> Vec<PointBearing> {
     results
 }
 
-#[tokio::main]
-async fn main() {
-    lazy_static::initialize(&CLI_OPTIONS);
-
-    let file = File::open(&CLI_OPTIONS.gpx_path).unwrap();
-    let reader = BufReader::new(file);
-
-    // read takes any io::Read and gives a Result<Gpx, Error>.
-    progress_stage("Parsing GPX data");
-    progress("Reading GPX file");
-    let gpx: Gpx = read(reader).unwrap();
-    let all_points = gpx
-        .tracks
+fn read_gpx<R: std::io::Read>(reader: R) -> Vec<Point<f64>> {
+    let gpx: Gpx = read(reader).expect("Could not read gpx");
+    gpx.tracks
         .par_iter()
         .map(|track| {
             track
@@ -485,7 +485,34 @@ async fn main() {
                 .flatten()
         })
         .flatten()
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+}
+
+fn read_json<R: std::io::Read>(reader: R) -> Vec<Point<f64>> {
+    let points: Vec<GSVPoint> =
+        serde_json::from_reader(reader).expect("Could not parse json input");
+    points
+        .into_iter()
+        .map(|gsv| Point::new(gsv.lng, gsv.lat))
+        .collect::<Vec<_>>()
+}
+
+#[tokio::main]
+async fn main() {
+    lazy_static::initialize(&CLI_OPTIONS);
+
+    let file = File::open(&CLI_OPTIONS.input_path).unwrap();
+    let reader = BufReader::new(file);
+    let is_gpx = &CLI_OPTIONS.input_path.extension() == &Some(std::ffi::OsStr::new("gpx"));
+
+    progress_stage("Parsing GPX data");
+    progress("Reading GPX file");
+    let original_points = if is_gpx {
+        read_gpx(reader)
+    } else {
+        read_json(reader)
+    };
+    let all_points = original_points.clone();
 
     progress("Computing distance statistics");
     let distances = find_distances(&all_points);
@@ -554,8 +581,15 @@ async fn main() {
         frames: gps_points.len(),
         averageError: errs.iter().sum::<f64>() / errs.len() as f64,
         gpsPoints: gps_points,
+        originalPoints: original_points
+            .iter()
+            .map(|p| GSVPoint {
+                lat: p.lat(),
+                lng: p.lng(),
+            })
+            .collect::<Vec<_>>(),
     };
-    if CLI_OPTIONS.dry_run {
+    if CLI_OPTIONS.dry_run || CLI_OPTIONS.print_metadata {
         if CLI_OPTIONS.json {
             println!(
                 "{}",
@@ -564,7 +598,9 @@ async fn main() {
         } else {
             println!("{:?}", &metadata_result);
         }
-        return;
+        if CLI_OPTIONS.dry_run {
+            return;
+        }
     }
 
     if CLI_OPTIONS.max_frames.unwrap_or(0) > 0 {
@@ -585,7 +621,7 @@ async fn main() {
     );
 
     progress_stage("Joining images into video sequence");
-    create_timelapse(&output_dir, &original_timelapse_name).await;
+    create_timelapse(&output_dir, points.len(), &original_timelapse_name).await;
     let output_timelapse_name = &CLI_OPTIONS
         .output
         .clone()
@@ -605,6 +641,7 @@ async fn main() {
             progress_stage("Blending frames to apply blur");
             blend_timelapse(
                 &output_dir,
+                points.len(),
                 &original_timelapse_name,
                 &output_timelapse_name,
             )
@@ -614,16 +651,13 @@ async fn main() {
             progress_stage("Interpolating motion to apply blur");
             minterp_timelapse(
                 &output_dir,
+                points.len(),
                 &original_timelapse_name,
                 &output_timelapse_name,
             )
             .await
         }
     };
-    if CLI_OPTIONS.save_metadata {
-        let metadata_file = fs::File::create(&format!("{}.json", &output_timelapse_name)).expect("File open failed");
-        serde_json::to_writer(&metadata_file, &metadata_result).expect("Serialization failed");
-    }
 
     // TODO optionally stabilize the output
     // TODO json output:
