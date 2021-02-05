@@ -24,20 +24,6 @@ use serde_json::json;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 
-/*
-TODO
-1. load gpx track file
-  1b. support other formats like gpx route, .fit course
-2. select points and orientations along gpx track
-  2b. use kalman filter to make it more accurate
-3. query streetview for pictures of these orientations
-https://maps.googleapis.com/maps/api/streetview?size=400x400&location=47.5763831,-122.4211769&fov=80&heading=70&pitch=0&key=YOUR_API_KEY
-  3b. maybe add option to query mapillary instead
-  3c. maybe make this a separate crate
-4. turn into a video by concatenating frames and sending to ffmpeg
-  4b. use hyperlapse algo to make it look smoother
-  4c. or add some kind of zoom-blur effect to transition between images
-*/
 // example
 // ffmpeg -framerate 30 -pattern_type glob -i "folder-with-photos/*.JPG" -s:v 1440x1080 -c:v libx264 -crf 25 -pix_fmt yuv420p my-timelapse.mp4
 
@@ -393,27 +379,14 @@ fn interp_points(points: Vec<Point<f64>>, factor: usize) -> Vec<Point<f64>> {
         points
             .iter()
             .zip(points.iter().skip(1))
-            .flat_map(
-                |(p1, p2)| {
-                    p1.haversine_intermediate_fill(
-                        p2,
-                        p1.haversine_distance(p2) / (factor as f64),
-                        /* include ends */ false,
-                    )
-                    .into_iter()
-                }, /*
-                   // technically this changes the paths just a little bit? since 1 lat != 1 lng
-                   // TODO make it correct by taking into account distances correctly
-                   let x_step = (p2.lng() - p1.lng()) / (factor as f64);
-                   let y_step = (p2.lat() - p1.lat()) / (factor as f64);
-                   (0..factor).map(move |i| {
-                       Point::new(
-                           p1.lng() + x_step * (i as f64),
-                           p1.lat() + y_step * (i as f64),
-                       )
-                   })
-                   */
-            )
+            .flat_map(|(p1, p2)| {
+                p1.haversine_intermediate_fill(
+                    p2,
+                    p1.haversine_distance(p2) / (factor as f64),
+                    /* include ends */ false,
+                )
+                .into_iter()
+            })
             .collect::<Vec<_>>()
     }
 }
@@ -660,8 +633,6 @@ async fn main() {
     };
 
     // TODO optionally stabilize the output
-    // TODO json output:
-    // output filename, list of streetview points (one per frame)
 }
 
 // butterr but slow
@@ -683,4 +654,3 @@ async fn main() {
 // for stabilization, maybe try https://github.com/georgmartius/vid.stab ?
 //   - maybe that helped a little bit...
 // maybe lowest hanging fruit is to cut out frames that are very out of place in the output
-// next step: visualize the error between our gps point and google's provided streetview point (can use metadata request for this)
