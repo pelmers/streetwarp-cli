@@ -24,6 +24,7 @@ use serde_json::json;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 
+mod optim;
 // example
 // ffmpeg -framerate 30 -pattern_type glob -i "folder-with-photos/*.JPG" -s:v 1440x1080 -c:v libx264 -crf 25 -pix_fmt yuv420p my-timelapse.mp4
 
@@ -243,11 +244,11 @@ async fn create_timelapse<P: AsRef<Path>>(image_dir: P, num_images: usize, out_f
         &(move |frame| 100.0 * (frame as f64) / (num_images as f64)),
         &[
             "-framerate",
-            "8",
+            "24",
             "-pattern_type",
             "sequence",
             "-i",
-            "%d.jpg",
+            "%d.opt.jpg",
             "-s:v",
             "640x480",
             "-c:v",
@@ -276,13 +277,13 @@ async fn blend_timelapse<P: AsRef<Path>>(
     // ffmpeg -i streetwarp.mp4-original.mp4 -filter_complex "[0:v]minterpolate=fps=48.0,tblend=all_mode=average,framestep=2[out]" -map "[out]" -c:v libx264 -crf 17 -pix_fmt yuv420p -y -preset ultrafast -progress streetwarp-lapse24_blur.mp4
     ffmpeg(
         image_dir,
-        &(move |frame| 33.3 * (frame as f64) / (num_images as f64)),
+        &(move |frame| 100.0 * (frame as f64) / (num_images as f64)),
         // TODO use tmix filter: https://video.stackexchange.com/a/26260
         &[
             "-i",
             original_filename,
             "-filter_complex",
-            "[0:v]minterpolate=fps=24,tblend=all_mode=average,framestep=3[out]",
+            "[0:v]minterpolate=fps=48,tblend=all_mode=average,framestep=2[out]",
             "-map",
             "[out]",
             "-c:v",
@@ -316,7 +317,7 @@ async fn minterp_timelapse<P: AsRef<Path>>(
             "-i",
             original_filename,
             "-filter:v",
-            "minterpolate='mi_mode=mci:mc_mode=aobmc:vsbmc=1:fps=24'",
+            "minterpolate='mi_mode=mci:mc_mode=aobmc:vsbmc=1:fps=72'",
             "-c:v",
             "libx264",
             "-crf",
@@ -562,7 +563,7 @@ async fn main() {
             })
             .collect::<Vec<_>>(),
     };
-    if CLI_OPTIONS.dry_run || CLI_OPTIONS.print_metadata {
+    if CLI_OPTIONS.dry_run {
         if CLI_OPTIONS.json {
             println!(
                 "{}",
@@ -571,19 +572,33 @@ async fn main() {
         } else {
             println!("{:?}", &metadata_result);
         }
-        if CLI_OPTIONS.dry_run {
-            return;
-        }
     }
 
     if CLI_OPTIONS.max_frames.unwrap_or(0) > 0 {
         points.truncate(CLI_OPTIONS.max_frames.unwrap());
     }
-    get_images(&points, &output_dir).await;
+    // get_images(&points, &output_dir).await;
 
+    progress_stage("Optimizing image sequence (removing inconsistencies)");
+    optim::optimize_sequence(&output_dir, points.len()).await;
+    return;
     // TODO dynamic program images to remove bigtime outliers (like hyperlapse does)
     // 640 x 480 x 3 = about 1.6 MB per image to keep in memory
     // cost function could be some histogram operation? (maybe use hue?)
+    // idea: load all the images in memory, record their histogram/hashes, then do DP
+    // then go thru the filesystem and perform lots of renames/unlinks
+    // then also adjust metadata result to remove the removed ones
+
+    if CLI_OPTIONS.print_metadata {
+        if CLI_OPTIONS.json {
+            println!(
+                "{}",
+                serde_json::to_string(&metadata_result).expect("Serialization failed")
+            );
+        } else {
+            println!("{:?}", &metadata_result);
+        }
+    }
 
     let original_timelapse_name = format!(
         "{}-original.mp4",
