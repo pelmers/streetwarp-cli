@@ -581,7 +581,7 @@ async fn main() {
 
     progress_stage("Optimizing image sequence (removing inconsistencies)");
     optim::optimize_sequence(&output_dir, points.len()).await;
-    return;
+    // return;
     // TODO dynamic program images to remove bigtime outliers (like hyperlapse does)
     // 640 x 480 x 3 = about 1.6 MB per image to keep in memory
     // cost function could be some histogram operation? (maybe use hue?)

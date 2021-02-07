@@ -1,11 +1,11 @@
 use std::path::Path;
 
 use futures::{stream, StreamExt};
-use palette::Srgb;
+use img_hash::{HashAlg, HasherConfig, ImageHash};
 use rayon::prelude::*;
 
 const LOOKAHEAD: usize = 3;
-const SKIP_PENALTY: f64 = 0.1;
+const SKIP_PENALTY: f64 = 0.3;
 
 // TODO dynamic program images to remove bigtime outliers (like hyperlapse does)
 // 640 x 480 x 3 = about 1.6 MB per image to keep in memory
@@ -42,19 +42,25 @@ pub async fn optimize_sequence<P: AsRef<Path>>(image_dir: &P, n_images: usize) {
         .await;
 }
 
-fn hash(img: &image::RgbImage) -> Vec<f64> {
+fn hash(img: &image::RgbImage) -> ImageHash {
     let scale = img.width() * img.height() * 255;
+    let hasher = HasherConfig::new()
+        .hash_size(16, 16)
+        .hash_alg(HashAlg::Blockhash)
+        .to_hasher();
+    hasher.hash_image(img)
     // TODO improve this "hashing algo" :)
-    (0..3)
-        .map(|channel| img.pixels().map(|p| p[channel] as f64 / scale as f64).sum())
-        .collect::<Vec<f64>>()
+    // (0..3)
+    // .map(|channel| img.pixels().map(|p| p[channel] as f64 / scale as f64).sum())
+    // .collect::<Vec<f64>>()
 }
 
-fn cost(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(p, q)| (p - q).abs()).sum::<f64>() / (a.len() as f64)
+fn cost(a: &ImageHash, b: &ImageHash) -> f64 {
+    let scale = (8 * a.as_bytes().len()) as f64;
+    a.dist(b) as f64 / scale
 }
 
-fn dp(hashes: Vec<Vec<f64>>) -> Vec<usize> {
+fn dp(hashes: Vec<ImageHash>) -> Vec<usize> {
     // Constructs costs vec which maps each image to the lowest cost it can be used.
     let mut costs: Vec<f64> = Vec::with_capacity(hashes.len());
     let mut prevs: Vec<usize> = Vec::with_capacity(hashes.len());
@@ -64,7 +70,7 @@ fn dp(hashes: Vec<Vec<f64>>) -> Vec<usize> {
             .map(|candidate_index| {
                 (
                     costs[candidate_index]
-                        + cost(&hashes[candidate_index], hash)
+                        + cost(hash, &hashes[candidate_index])
                         + (i - candidate_index - 1) as f64 * SKIP_PENALTY,
                     candidate_index,
                 )
@@ -85,6 +91,7 @@ fn dp(hashes: Vec<Vec<f64>>) -> Vec<usize> {
     let skipped = (0..hashes.len())
         .filter(|i| !new_indices.contains(i))
         .collect::<Vec<_>>();
-    println!("skipped!: {:?}", skipped);
+    println!("costs! {:?}", costs);
+    println!("skipped {} ! {:?}", skipped.len(), skipped);
     new_indices
 }
