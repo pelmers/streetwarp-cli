@@ -7,12 +7,6 @@ use rayon::prelude::*;
 const LOOKAHEAD: usize = 3;
 const SKIP_PENALTY: f64 = 0.3;
 
-// TODO dynamic program images to remove bigtime outliers (like hyperlapse does)
-// 640 x 480 x 3 = about 1.6 MB per image to keep in memory
-// cost function could be some histogram operation? (maybe use hue?)
-// idea: load all the images in memory, record their histogram/hashes, then do DP
-// then go thru the filesystem and perform lots of renames/unlinks
-// then also adjust metadata result to remove the removed ones
 pub async fn optimize_sequence<P: AsRef<Path>>(image_dir: &P, n_images: usize) {
     let image_files = (0..n_images)
         .map(|i| image_dir.as_ref().join(format!("{}.jpg", &i)))
@@ -43,13 +37,13 @@ pub async fn optimize_sequence<P: AsRef<Path>>(image_dir: &P, n_images: usize) {
 }
 
 fn hash(img: &image::RgbImage) -> ImageHash {
-    let scale = img.width() * img.height() * 255;
     let hasher = HasherConfig::new()
         .hash_size(16, 16)
         .hash_alg(HashAlg::Blockhash)
         .to_hasher();
     hasher.hash_image(img)
     // TODO improve this "hashing algo" :)
+    // let scale = img.width() * img.height() * 255;
     // (0..3)
     // .map(|channel| img.pixels().map(|p| p[channel] as f64 / scale as f64).sum())
     // .collect::<Vec<f64>>()
@@ -88,10 +82,12 @@ fn dp(hashes: Vec<ImageHash>) -> Vec<usize> {
     }
     new_indices.push(0);
     new_indices.reverse();
+    /*
     let skipped = (0..hashes.len())
         .filter(|i| !new_indices.contains(i))
         .collect::<Vec<_>>();
     println!("costs! {:?}", costs);
     println!("skipped {} ! {:?}", skipped.len(), skipped);
+    */
     new_indices
 }

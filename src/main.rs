@@ -259,6 +259,8 @@ async fn create_timelapse<P: AsRef<Path>>(image_dir: P, num_images: usize, out_f
             "yuv420p",
             "-preset",
             "ultrafast",
+            "-movflags",
+            "faststart",
             "-progress",
             "pipe:1",
             "-y",
@@ -294,6 +296,8 @@ async fn blend_timelapse<P: AsRef<Path>>(
             "yuv420p",
             "-preset",
             "ultrafast",
+            "-movflags",
+            "faststart",
             "-progress",
             "pipe:1",
             "-y",
@@ -326,6 +330,8 @@ async fn minterp_timelapse<P: AsRef<Path>>(
             "yuv420p",
             "-preset",
             "ultrafast",
+            "-movflags",
+            "faststart",
             "-progress",
             "pipe:1",
             "-y",
@@ -577,17 +583,11 @@ async fn main() {
     if CLI_OPTIONS.max_frames.unwrap_or(0) > 0 {
         points.truncate(CLI_OPTIONS.max_frames.unwrap());
     }
-    // get_images(&points, &output_dir).await;
+    get_images(&points, &output_dir).await;
 
     progress_stage("Optimizing image sequence (removing inconsistencies)");
     optim::optimize_sequence(&output_dir, points.len()).await;
     // return;
-    // TODO dynamic program images to remove bigtime outliers (like hyperlapse does)
-    // 640 x 480 x 3 = about 1.6 MB per image to keep in memory
-    // cost function could be some histogram operation? (maybe use hue?)
-    // idea: load all the images in memory, record their histogram/hashes, then do DP
-    // then go thru the filesystem and perform lots of renames/unlinks
-    // then also adjust metadata result to remove the removed ones
 
     if CLI_OPTIONS.print_metadata {
         if CLI_OPTIONS.json {
