@@ -3,6 +3,7 @@ use std::path::Path;
 use futures::{stream, StreamExt};
 use img_hash::{HashAlg, HasherConfig, ImageHash};
 use rayon::prelude::*;
+use image::GenericImageView;
 
 const LOOKAHEAD: usize = 3;
 const SKIP_PENALTY: f64 = 0.3;
@@ -36,25 +37,35 @@ pub async fn optimize_sequence<P: AsRef<Path>>(image_dir: &P, n_images: usize) {
         .await;
 }
 
-fn hash(img: &image::RgbImage) -> ImageHash {
+type HashType = ImageHash;
+fn hash(img: &image::RgbImage) -> HashType {
     let hasher = HasherConfig::new()
         .hash_size(16, 16)
-        .hash_alg(HashAlg::Blockhash)
+        .hash_alg(HashAlg::Mean)
         .to_hasher();
-    hasher.hash_image(img)
+        let y = img.height() / 3;
+        let x = img.width() / 3;
+    // This section takes the center ninth of the image for comparison. In most
+    // streetview images the top is the sky and the bottom is the road, so we don't
+    // need to look for similarities in these regions. Instead just compare straight ahead.
+    let img = img.view(x, y, x, y);
+    let img = image::imageops::thumbnail(&img, x, y);
+    hasher.hash_image(&img)
     // TODO improve this "hashing algo" :)
+    // idea is to turn each image into a bag of features
     // let scale = img.width() * img.height() * 255;
     // (0..3)
     // .map(|channel| img.pixels().map(|p| p[channel] as f64 / scale as f64).sum())
     // .collect::<Vec<f64>>()
 }
 
-fn cost(a: &ImageHash, b: &ImageHash) -> f64 {
+fn cost(a: &HashType, b: &HashType) -> f64 {
+    // TODO: use RANSAC to find homography between a and b feature vecs and compute alignment cost
     let scale = (8 * a.as_bytes().len()) as f64;
     a.dist(b) as f64 / scale
 }
 
-fn dp(hashes: Vec<ImageHash>) -> Vec<usize> {
+fn dp(hashes: Vec<HashType>) -> Vec<usize> {
     // Constructs costs vec which maps each image to the lowest cost it can be used.
     let mut costs: Vec<f64> = Vec::with_capacity(hashes.len());
     let mut prevs: Vec<usize> = Vec::with_capacity(hashes.len());
@@ -82,7 +93,7 @@ fn dp(hashes: Vec<ImageHash>) -> Vec<usize> {
     }
     new_indices.push(0);
     new_indices.reverse();
-    /*
+    /* 
     let skipped = (0..hashes.len())
         .filter(|i| !new_indices.contains(i))
         .collect::<Vec<_>>();

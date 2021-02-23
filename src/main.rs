@@ -280,7 +280,6 @@ async fn blend_timelapse<P: AsRef<Path>>(
     ffmpeg(
         image_dir,
         &(move |frame| 100.0 * (frame as f64) / (num_images as f64)),
-        // TODO use tmix filter: https://video.stackexchange.com/a/26260
         &[
             "-i",
             original_filename,
@@ -578,6 +577,7 @@ async fn main() {
         } else {
             println!("{:?}", &metadata_result);
         }
+        return;
     }
 
     if CLI_OPTIONS.max_frames.unwrap_or(0) > 0 {
@@ -587,7 +587,6 @@ async fn main() {
 
     progress_stage("Optimizing image sequence (removing inconsistencies)");
     optim::optimize_sequence(&output_dir, points.len()).await;
-    // return;
 
     if CLI_OPTIONS.print_metadata {
         if CLI_OPTIONS.json {
