@@ -493,7 +493,7 @@ async fn main() {
     };
     let all_points = original_points.clone();
 
-    progress("Computing distance statistics");
+    progress(&format!("Computing distance statistics ({} points)", all_points.len()));
     let distances = find_distances(&all_points);
     let distance = distances.iter().sum::<f64>();
     if !CLI_OPTIONS.json {
@@ -586,7 +586,7 @@ async fn main() {
     get_images(&points, &output_dir).await;
 
     progress_stage("Optimizing image sequence (removing inconsistencies)");
-    optim::optimize_sequence(&output_dir, points.len()).await;
+    let n_points = optim::optimize_sequence(&output_dir, points.len()).await;
 
     if CLI_OPTIONS.print_metadata {
         if CLI_OPTIONS.json {
@@ -607,8 +607,8 @@ async fn main() {
             .unwrap_or("streetwarp-lapse".to_string())
     );
 
-    progress_stage("Joining images into video sequence");
-    create_timelapse(&output_dir, points.len(), &original_timelapse_name).await;
+    progress_stage(&format!("Joining {} images into video sequence", n_points));
+    create_timelapse(&output_dir, n_points, &original_timelapse_name).await;
     let output_timelapse_name = &CLI_OPTIONS
         .output
         .clone()

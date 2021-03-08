@@ -8,7 +8,7 @@ use image::GenericImageView;
 const LOOKAHEAD: usize = 3;
 const SKIP_PENALTY: f64 = 0.3;
 
-pub async fn optimize_sequence<P: AsRef<Path>>(image_dir: &P, n_images: usize) {
+pub async fn optimize_sequence<P: AsRef<Path>>(image_dir: &P, n_images: usize) -> usize {
     let image_files = (0..n_images)
         .map(|i| image_dir.as_ref().join(format!("{}.jpg", &i)))
         .collect::<Vec<_>>();
@@ -35,6 +35,7 @@ pub async fn optimize_sequence<P: AsRef<Path>>(image_dir: &P, n_images: usize) {
             ));
         })
         .await;
+    kept_indices.len()
 }
 
 type HashType = ImageHash;
