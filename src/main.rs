@@ -81,6 +81,10 @@ struct Cli {
     /// Whether to print out progress messages (in JSON) to stdout. Default: off.
     #[structopt(long)]
     progress: bool,
+
+    /// Whether to optimize image sequence to remove outliers.
+    #[structopt(long)]
+    optimize: bool,
 }
 
 #[derive(Deserialize, Serialize, Debug, Copy, Clone, Default, PartialEq)]
@@ -239,6 +243,11 @@ async fn ffmpeg<P: AsRef<Path>>(working_dir: P, get_progress: &GetProgress, args
 
 async fn create_timelapse<P: AsRef<Path>>(image_dir: P, num_images: usize, out_filename: &str) {
     // ffmpeg -framerate 30 -pattern_type glob -i "folder-with-photos/*.JPG" -s:v 1440x1080 -c:v libx264 -crf 25 -pix_fmt yuv420p my-timelapse.mp4
+    let pattern = if CLI_OPTIONS.optimize {
+        "%d.opt.jpg"
+    } else {
+        "%d.jpg"
+    };
     ffmpeg(
         image_dir,
         &(move |frame| 100.0 * (frame as f64) / (num_images as f64)),
@@ -248,7 +257,7 @@ async fn create_timelapse<P: AsRef<Path>>(image_dir: P, num_images: usize, out_f
             "-pattern_type",
             "sequence",
             "-i",
-            "%d.opt.jpg",
+            pattern,
             "-s:v",
             "640x480",
             "-c:v",
@@ -493,7 +502,10 @@ async fn main() {
     };
     let all_points = original_points.clone();
 
-    progress(&format!("Computing distance statistics ({} points)", all_points.len()));
+    progress(&format!(
+        "Computing distance statistics ({} points)",
+        all_points.len()
+    ));
     let distances = find_distances(&all_points);
     let distance = distances.iter().sum::<f64>();
     if !CLI_OPTIONS.json {
@@ -585,8 +597,12 @@ async fn main() {
     }
     get_images(&points, &output_dir).await;
 
-    progress_stage("Optimizing image sequence (removing inconsistencies)");
-    let n_points = optim::optimize_sequence(&output_dir, points.len()).await;
+    let n_points = if CLI_OPTIONS.optimize {
+        progress_stage("Optimizing image sequence (removing inconsistencies)");
+        optim::optimize_sequence(&output_dir, points.len()).await
+    } else {
+        points.len()
+    };
 
     if CLI_OPTIONS.print_metadata {
         if CLI_OPTIONS.json {
