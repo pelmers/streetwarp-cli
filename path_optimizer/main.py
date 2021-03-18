@@ -3,6 +3,7 @@ from subprocess import check_call
 import sys
 import glob
 from multiprocessing import Pool
+
 # Various manipulations to get a "portable" version of opencv that can go travel to aws lambda
 dist_site = path.join(path.curdir, 'dist', 'lib', 'python3.7', 'site-packages')
 patchelf = path.join(path.curdir, 'dist', 'bin', 'patchelf')

@@ -22,6 +22,7 @@ pub async fn optimize_sequence<P: AsRef<Path>>(image_dir: &P, n_images: usize) -
             )
         })
         .collect::<Vec<_>>();
+    // TODO get this from a program I call instead
     let kept_indices = dp(hashes);
 
     stream::iter(kept_indices.iter().enumerate())

@@ -23,6 +23,7 @@ use reqwest::Client;
 use serde_json::json;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
+use fs_extra::dir::get_size;
 
 mod optim;
 // example
@@ -85,6 +86,8 @@ struct Cli {
     /// Whether to optimize image sequence to remove outliers.
     #[structopt(long)]
     optimize: bool,
+
+    // TODO: add optional "custom optimizer" to be called (so I can write a python opencv program)
 }
 
 #[derive(Deserialize, Serialize, Debug, Copy, Clone, Default, PartialEq)]
@@ -195,7 +198,11 @@ async fn get_metadata(point_bearings: &[PointBearing]) -> Vec<GSVMetadata> {
             let client = &client;
             async move {
                 let resp = client.get(&url).send().await;
-                (index, resp.unwrap().bytes().await)
+                let resp = resp.expect("Error in streetview metadata response");
+                if !resp.status().is_success() {
+                    panic!("Error code in streetview metadata response: {:?}", resp.status());
+                }
+                (index, resp.bytes().await)
             }
         })
         .buffer_unordered(CLI_OPTIONS.network_concurrency.unwrap_or(40));
@@ -358,7 +365,13 @@ fn group_by_location(
     for (point_bearing, meta) in point_bearings
         .into_iter()
         .zip(metadata.into_iter())
-        .filter(|(_, metadata)| metadata.status == "OK")
+        .filter(|(_, metadata)| {
+            let is_ok = metadata.status == "OK";
+            if !is_ok {
+                println!("Metadata not ok! ${:?}", &metadata);
+            }
+            is_ok
+        })
     {
         if let Some(last_pano) = last_pano {
             if last_pano != meta.pano_id {
@@ -379,7 +392,7 @@ fn group_by_location(
             group
                 .into_iter()
                 .min_by_key(|(_, _, err)| ordered_float::OrderedFloat(*err))
-                .unwrap()
+                .expect("Could not group streetview points")
         })
         .collect::<Vec<_>>();
     let errs = best_groups.iter().map(|(_, _, e)| *e).collect::<Vec<_>>();
@@ -548,6 +561,7 @@ async fn main() {
     ));
     progress_stage("Fetching Streetview metadata");
     let metadata = get_metadata(&points).await;
+    progress(&format!("Found metadata for {} streetview points", metadata.len()));
     let (mut points, metadata, errs) = group_by_location(points, metadata);
 
     if !CLI_OPTIONS.json {
@@ -596,6 +610,8 @@ async fn main() {
         points.truncate(CLI_OPTIONS.max_frames.unwrap());
     }
     get_images(&points, &output_dir).await;
+    let dir_size = get_size(&output_dir).unwrap_or(0);
+    progress(&format!("Fetched images, output size: {:.2} MB", (dir_size as f64) / 1000000.0));
 
     let n_points = if CLI_OPTIONS.optimize {
         progress_stage("Optimizing image sequence (removing inconsistencies)");
