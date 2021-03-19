@@ -1,17 +1,17 @@
+#!/usr/bin/env python3
+
 from os import path
 from subprocess import check_call
 import sys
 import glob
 from multiprocessing import Pool
 
+curdir = path.abspath(path.dirname(__file__))
 # Various manipulations to get a "portable" version of opencv that can go travel to aws lambda
-dist_site = path.join(path.curdir, 'dist', 'lib', 'python3.7', 'site-packages')
-patchelf = path.join(path.curdir, 'dist', 'bin', 'patchelf')
-rpath = path.join(path.abspath(path.curdir), 'dist', 'lib64')
-def patch(fname):
-    check_call([patchelf, '--set-rpath', rpath, fname])
-with Pool(7) as p:
-    p.map(patch, [path.join(dist_site, 'cv2.so')] + glob.glob(path.join(rpath, '*.so')))
+dist_site = path.join(curdir, 'dist', 'lib', 'python3.8', 'site-packages')
+# TODO patchelf can't be called on read-only file system
+patchelf = path.join(curdir, 'dist', 'bin', 'patchelf')
+rpath = path.join(curdir, 'dist', 'lib64')
 
 sys.path.append(dist_site)
 from functools import lru_cache

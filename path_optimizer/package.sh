@@ -1,6 +1,6 @@
 #!/bin/bash
 
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+DIR=$(readlink -f "$(dirname "$0")")
 cd $DIR
 docker build . -t path_optimizer
 id=$(docker create path_optimizer bash)
