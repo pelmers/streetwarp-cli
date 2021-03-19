@@ -28,7 +28,7 @@ RUN cd opencv-3.4.13 && mkdir build && cd build && \
     -D CMAKE_CXX_FLAGS="-Os -s -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,-s" \
     -D CMAKE_INSTALL_PREFIX=/opt/ \
     -D INSTALL_PYTHON_EXAMPLES=OFF \
-    -D BUILD_LIST="python3,flann,imgproc,xfeatures2d,calib3d" \
+    -D BUILD_LIST="python3,flann,imgcodecs,imgproc,xfeatures2d,calib3d" \
     -D INSTALL_C_EXAMPLES=OFF \
     -D WITH_FFMPEG=OFF \
     -D WITH_TBB=ON \
@@ -47,9 +47,9 @@ RUN cd /opt/lib/python3.8/site-packages && mv cv2/python-3.8/cv2.cpython-38-x86_
 RUN wget https://github.com/NixOS/patchelf/archive/0.12.tar.gz && tar -xf 0.12.tar.gz
 RUN cd patchelf-0.12 && ./bootstrap.sh && ./configure && make && make check && make install
 
-RUN FIND /opt/lib64 -name *.so -exec patchelf --set-rpath "\$ORIGIN" {} \;
+# RUN find /opt/lib64 -name *.so -exec patchelf --set-rpath "\$ORIGIN" {} \;
 ENV PYTHONPATH="/opt/lib/python3.8/site-packages:${PYTHONPATH}"
 RUN python3 -c 'import numpy; numpy.identity(3); print("Python: import numpy - SUCCESS")'
-RUN python3 -c 'import cv2; cv2.xfeatures2d.BriefDescriptorExtractor_create(); print("Python: import cv2 - SUCCESS")'
+RUN python3 -c 'import cv2; from cv2 import imread; cv2.xfeatures2d.BriefDescriptorExtractor_create(); print("Python: import cv2 - SUCCESS")'
 
-RUN cd /opt && tar -cf target.tar lib lib64 bin
+RUN cd /opt && tar -cf target.tar lib64 lib

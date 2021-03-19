@@ -23,6 +23,10 @@ pub async fn optimize_sequence<P: AsRef<Path>>(image_dir: &P) -> usize {
             std::str::from_utf8(&output.stderr).unwrap()
         );
     }
+    if !output.status.success() {
+        eprintln!("optimizer exit code {:?}", output.status.code());
+        return 0;
+    }
     let kept_indices: Vec<usize> =
         serde_json::from_str(std::str::from_utf8(&output.stdout).expect("Output was not utf8"))
             .unwrap();
