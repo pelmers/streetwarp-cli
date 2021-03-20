@@ -69,7 +69,7 @@ async fn get_images<P: AsRef<Path>>(point_bearings: &[PointBearing], out_dir: &P
     // and to skip images that are a copy of the previous one
     let url = |point_bearing: &PointBearing| {
         format!(
-"https://maps.googleapis.com/maps/api/streetview?size=640x480&location={},{}&fov=120&source=outdoor&heading={}&pitch=0&key={}", point_bearing.point.lat(), point_bearing.point.lng(), point_bearing.bearing, CLI_OPTIONS.api_key)
+"https://maps.googleapis.com/maps/api/streetview?size=640x480&location={},{}&fov=100&source=outdoor&heading={}&pitch=0&key={}", point_bearing.point.lat(), point_bearing.point.lng(), point_bearing.bearing, CLI_OPTIONS.api_key)
     };
     let client = Client::new();
     let bodies = stream::iter(point_bearings.iter().map(url).enumerate())
@@ -334,7 +334,12 @@ async fn main() {
     progress_stage("Fetching Streetview metadata");
     let metadata = get_metadata(&points).await;
     progress(&format!("Found metadata for {} streetview points", metadata.len()));
-    let (mut points, metadata, errs) = group_by_location(points, metadata);
+    let (mut points, mut metadata, mut errs) = group_by_location(points, metadata);
+    if CLI_OPTIONS.max_frames.unwrap_or(0) > 0 {
+        metadata.truncate(CLI_OPTIONS.max_frames.unwrap());
+        points.truncate(CLI_OPTIONS.max_frames.unwrap());
+        errs.truncate(CLI_OPTIONS.max_frames.unwrap());
+    }
 
     if !CLI_OPTIONS.json {
         println!(
@@ -373,15 +378,12 @@ async fn main() {
                 serde_json::to_string(&metadata_result).expect("Serialization failed")
             );
         } else {
+            // TODO if not dry run put this after image optimization
             println!("{:?}", &metadata_result);
         }
         return;
     }
 
-    if CLI_OPTIONS.max_frames.unwrap_or(0) > 0 {
-        points.truncate(CLI_OPTIONS.max_frames.unwrap());
-    }
-    points.truncate(2);
     get_images(&points, &output_dir).await;
     let dir_size = get_size(&output_dir).unwrap_or(0);
     progress(&format!("Fetched images, output size: {:.2} MB", (dir_size as f64) / 1000000.0));
@@ -433,7 +435,7 @@ async fn main() {
             progress_stage("Blending frames to apply blur");
             blend_timelapse(
                 &output_dir,
-                points.len(),
+                n_points,
                 &original_timelapse_name,
                 &output_timelapse_name,
             )
@@ -443,7 +445,7 @@ async fn main() {
             progress_stage("Interpolating motion to apply blur");
             minterp_timelapse(
                 &output_dir,
-                points.len(),
+                n_points,
                 &original_timelapse_name,
                 &output_timelapse_name,
             )
@@ -452,8 +454,6 @@ async fn main() {
     };
     let dir_size = get_size(&output_dir).unwrap_or(0);
     progress(&format!("Created video, total output size: {:.2} MB", (dir_size as f64) / 1000000.0));
-
-    // TODO optionally stabilize the output
 }
 
 // butterr but slow
