@@ -35,6 +35,7 @@ def largest_indices(ary, n):
 
 _cache = {}
 def extract_features(img, cache_key):
+    # Note that caching by storing the img would defeat the purpose
     if cache_key in _cache:
         return _cache[cache_key]
     img = img[:-19, :, :]  # perfectly crops out 'google' text
