@@ -44,10 +44,6 @@ RUN pip3 uninstall -y numpy && pip install numpy --target="/opt/lib/python3.8/si
 RUN rm -r /opt/bin /opt/share /opt/include
 RUN cd /opt/lib/python3.8/site-packages && mv cv2/python-3.8/cv2.cpython-38-x86_64-linux-gnu.so cv2.so && rm -r cv2
 
-RUN wget https://github.com/NixOS/patchelf/archive/0.12.tar.gz && tar -xf 0.12.tar.gz
-RUN cd patchelf-0.12 && ./bootstrap.sh && ./configure && make && make check && make install
-
-# RUN find /opt/lib64 -name *.so -exec patchelf --set-rpath "\$ORIGIN" {} \;
 ENV PYTHONPATH="/opt/lib/python3.8/site-packages:${PYTHONPATH}"
 RUN python3 -c 'import numpy; numpy.identity(3); print("Python: import numpy - SUCCESS")'
 RUN python3 -c 'import cv2; from cv2 import imread; cv2.xfeatures2d.BriefDescriptorExtractor_create(); print("Python: import cv2 - SUCCESS")'
