@@ -4,7 +4,7 @@ use tokio::process::Command;
 use crate::options::CLI_OPTIONS;
 use futures::{stream, StreamExt};
 
-pub async fn optimize_sequence<P: AsRef<Path>>(image_dir: &P) -> usize {
+pub async fn optimize_sequence<P: AsRef<Path>>(image_dir: &P) -> Vec<usize> {
     let optimizer_cmd = CLI_OPTIONS.optimizer.clone().unwrap();
     let mut args = vec![image_dir
         .as_ref()
@@ -25,7 +25,7 @@ pub async fn optimize_sequence<P: AsRef<Path>>(image_dir: &P) -> usize {
     }
     if !output.status.success() {
         eprintln!("optimizer exit code {:?}", output.status.code());
-        return 0;
+        return vec![];
     }
     let kept_indices: Vec<usize> =
         serde_json::from_str(std::str::from_utf8(&output.stdout).expect("Output was not utf8"))
@@ -42,5 +42,5 @@ pub async fn optimize_sequence<P: AsRef<Path>>(image_dir: &P) -> usize {
             ));
         })
         .await;
-    kept_indices.len()
+    kept_indices
 }

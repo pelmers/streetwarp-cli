@@ -3,8 +3,8 @@ extern crate lazy_static;
 
 #[macro_use]
 extern crate serde_derive;
-mod optim;
 mod ffmpeg;
+mod optim;
 mod options;
 mod progress;
 
@@ -18,11 +18,10 @@ use gpx::{read, Gpx};
 
 use geo::{prelude::*, Point};
 
-
+use fs_extra::dir::get_size;
 use futures::{stream, StreamExt};
 use rayon::prelude::*;
 use reqwest::Client;
-use fs_extra::dir::get_size;
 
 use ffmpeg::*;
 use options::CLI_OPTIONS;
@@ -106,7 +105,10 @@ async fn get_metadata(point_bearings: &[PointBearing]) -> Vec<GSVMetadata> {
                 let resp = client.get(&url).send().await;
                 let resp = resp.expect("Error in streetview metadata response");
                 if !resp.status().is_success() {
-                    panic!("Error code in streetview metadata response: {:?}", resp.status());
+                    panic!(
+                        "Error code in streetview metadata response: {:?}",
+                        resp.status()
+                    );
                 }
                 (index, resp.bytes().await)
             }
@@ -134,16 +136,17 @@ fn group_by_location(
 ) -> (Vec<PointBearing>, Vec<GSVMetadata>, Vec<f64>) {
     let mut grouped_points = vec![vec![]];
     let mut last_pano = None;
-    for (point_bearing, meta) in point_bearings
-        .into_iter()
-        .zip(metadata.into_iter())
-        .filter(|(_, metadata)| {
-            let is_ok = metadata.status == "OK";
-            if !is_ok {
-                eprintln!("Metadata not ok! {:?}", &metadata);
-            }
-            is_ok
-        })
+    for (point_bearing, meta) in
+        point_bearings
+            .into_iter()
+            .zip(metadata.into_iter())
+            .filter(|(_, metadata)| {
+                let is_ok = metadata.status == "OK";
+                if !is_ok {
+                    eprintln!("Metadata not ok! {:?}", &metadata);
+                }
+                is_ok
+            })
     {
         if let Some(last_pano) = last_pano {
             if last_pano != meta.pano_id {
@@ -333,7 +336,10 @@ async fn main() {
     ));
     progress_stage("Fetching Streetview metadata");
     let metadata = get_metadata(&points).await;
-    progress(&format!("Found metadata for {} streetview points", metadata.len()));
+    progress(&format!(
+        "Found metadata for {} streetview points",
+        metadata.len()
+    ));
     let (mut points, mut metadata, mut errs) = group_by_location(points, metadata);
     if CLI_OPTIONS.max_frames.unwrap_or(0) > 0 {
         metadata.truncate(CLI_OPTIONS.max_frames.unwrap());
@@ -358,7 +364,7 @@ async fn main() {
         .map(|data| data.location)
         .collect::<Vec<_>>();
 
-    let metadata_result = MetadataResult {
+    let mut metadata_result = MetadataResult {
         distance: distances.iter().sum::<f64>(),
         frames: gps_points.len(),
         averageError: errs.iter().sum::<f64>() / errs.len() as f64,
@@ -378,7 +384,6 @@ async fn main() {
                 serde_json::to_string(&metadata_result).expect("Serialization failed")
             );
         } else {
-            // TODO if not dry run put this after image optimization
             println!("{:?}", &metadata_result);
         }
         return;
@@ -386,11 +391,19 @@ async fn main() {
 
     get_images(&points, &output_dir).await;
     let dir_size = get_size(&output_dir).unwrap_or(0);
-    progress(&format!("Fetched images, output size: {:.2} MB", (dir_size as f64) / 1000000.0));
+    progress(&format!(
+        "Fetched images, output size: {:.2} MB",
+        (dir_size as f64) / 1000000.0
+    ));
 
     let n_points = if CLI_OPTIONS.optimizer.is_some() {
         progress_stage("Optimizing image sequence (removing inconsistencies)");
-        optim::optimize_sequence(&output_dir).await
+        let kept_points = optim::optimize_sequence(&output_dir).await;
+        metadata_result.gpsPoints = kept_points
+            .iter()
+            .map(|&i| metadata_result.gpsPoints[i])
+            .collect::<Vec<_>>();
+        kept_points.len()
     } else {
         points.len()
     };
@@ -453,7 +466,10 @@ async fn main() {
         }
     };
     let dir_size = get_size(&output_dir).unwrap_or(0);
-    progress(&format!("Created video, total output size: {:.2} MB", (dir_size as f64) / 1000000.0));
+    progress(&format!(
+        "Created video, total output size: {:.2} MB",
+        (dir_size as f64) / 1000000.0
+    ));
 }
 
 // butterr but slow
