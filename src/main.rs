@@ -64,8 +64,6 @@ struct MetadataResult {
 }
 
 async fn get_images<P: AsRef<Path>>(point_bearings: &[PointBearing], out_dir: &P) {
-    // and to correct points lat/lng
-    // and to skip images that are a copy of the previous one
     let url = |point_bearing: &PointBearing| {
         format!(
 "https://maps.googleapis.com/maps/api/streetview?size=640x480&location={},{}&fov=100&source=outdoor&heading={}&pitch=0&key={}", point_bearing.point.lat(), point_bearing.point.lng(), point_bearing.bearing, CLI_OPTIONS.api_key)
@@ -471,23 +469,3 @@ async fn main() {
         (dir_size as f64) / 1000000.0
     ));
 }
-
-// butterr but slow
-// ffmpeg -i streetwarp-lapse24.mp4 -filter:v "minterpolate='mi_mode=mci:mc_mode=aobmc:vsbmc=1:fps=48'" -c:v libx264 -crf 17 -pix_fmt yuv420p -y -preset ultrafast streetwarp-lapse24_flow.mp4
-// optional vid stab
-// 1. ffmpeg -i streetwarp-lapse24_flow.mp4 -vf vidstabdetect=shakiness=5:accuracy=15 -f null -
-// 2. ffmpeg -i streetwarp-lapse24_flow.mp4 -vf vidstabtransform,unsharp=5:5:0.8:3:3:0.4 -c:v libx264 -crf 17 -pix_fmt yuv420p -y -preset ultrafast streetwarp-lapse24_flow_stab.mp4
-// TODO by priority
-// - most obvious issue is output smoothness
-// perhaps we can calculate a zoom/blend motion based on field of view + distance between points, etc.
-// or we can pay lots of money at google and with extra data create a hyperlapse
-//   - (i tried this, see 'twisty', it doesn't look good on its own)
-// hyperlapse example: https://vimeo.com/63653873, I think this video does about 80-100 frames per mile based on golden gate section
-//   - they very obviously have some kind of blur thing going on (probably some stabilization too?)
-//   - hmm that helps quite a bit actually, https://www.reddit.com/r/ffmpeg/comments/g2isg9/is_motion_blur_effect_possible_with_ffmpeg/fnm9uiz/?utm_source=reddit&utm_medium=web2x&context=3
-//   - maybe this would be even better? https://github.com/slowmoVideo/slowmoVideo
-//   - I think I still need some heuristic to cut out obviously wrong frames (some kind of DP algorithm)
-//      - maybe image hash with some kind of frame skip penalty
-// for stabilization, maybe try https://github.com/georgmartius/vid.stab ?
-//   - maybe that helped a little bit...
-// maybe lowest hanging fruit is to cut out frames that are very out of place in the output
