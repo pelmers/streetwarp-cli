@@ -18,3 +18,6 @@ serde_derive = "1.0.115"
 serde = "1.0.115"
 ordered-float = "2.0.0"
 fs_extra = "1.2.0"
+
+[patch.crates-io]
+gpx = { git = 'https://github.com/pelmers/gpx', branch = 'parse-copyright' }
