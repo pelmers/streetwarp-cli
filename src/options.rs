@@ -31,6 +31,10 @@ pub struct Cli {
     #[structopt(long)]
     pub max_frames: Option<usize>,
 
+    /// Skip first offset_frames in creating the video, default: 0
+    #[structopt(long)]
+    pub offset_frames: Option<usize>,
+
     /// Don't fetch images or create video, just show metadata and expected error.
     #[structopt(short, long)]
     pub dry_run: bool,
@@ -38,6 +42,10 @@ pub struct Cli {
     /// Print metadata before creating result video (implied if --dry-run)
     #[structopt(long)]
     pub print_metadata: bool,
+
+    /// If this is set, then input_path is interpreted as a metadata result and the program proceeds directly to video creation.
+    #[structopt(long)]
+    pub use_metadata: bool,
 
     /// Linearly interpolate given number of points between each point in the source file, default: use frames_per_mile.
     #[structopt(long)]

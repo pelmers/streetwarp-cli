@@ -411,7 +411,7 @@ version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "139007e3210dfc1d010e166e779059be5e0f31967a71f3edae97116aefb74450"
 dependencies = [
- "geo-types",
+ "geo-types 0.6.0",
  "geographiclib-rs",
  "num-traits",
  "rstar",
@@ -426,6 +426,15 @@ dependencies = [
  "approx",
  "num-traits",
  "rstar",
+]
+
+[[package]]
+name = "geo-types"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8bd2e95dd9f5c8ff74159ed9205ad7fd239a9569173a550863976421b45d2bb"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
@@ -457,12 +466,12 @@ checksum = "aaf91faf136cb47367fa430cd46e37a788775e7fa104f8b4bcb3861dc389b724"
 [[package]]
 name = "gpx"
 version = "0.8.1"
-source = "git+https://github.com/pelmers/gpx?branch=parse-copyright#c3fc76702be6c87d4ad830bcfd023ef18bd552dc"
+source = "git+https://github.com/pelmers/gpx?branch=parse-copyright#9005b1998209a341ba11c7812ffaafb335b6a521"
 dependencies = [
  "assert_approx_eq",
  "chrono",
  "error-chain",
- "geo-types",
+ "geo-types 0.7.2",
  "xml-rs",
 ]
 

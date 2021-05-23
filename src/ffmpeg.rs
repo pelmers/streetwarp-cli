@@ -1,10 +1,10 @@
-use std::process::Stdio;
 use std::path::Path;
+use std::process::Stdio;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 
-use crate::progress::progress;
 use crate::options::CLI_OPTIONS;
+use crate::progress::progress;
 
 type GetProgress = dyn Fn(usize) -> f64;
 pub async fn ffmpeg<P: AsRef<Path>>(working_dir: P, get_progress: &GetProgress, args: &[&str]) {

@@ -18,7 +18,7 @@ use gpx::{read, Gpx};
 
 use geo::{prelude::*, Point};
 
-use fs_extra::dir::get_size;
+use fs_extra::dir::{get_dir_content, get_size};
 use futures::{stream, StreamExt};
 use rayon::prelude::*;
 use reqwest::Client;
@@ -31,6 +31,13 @@ use progress::*;
 struct GSVPoint {
     lat: f64,
     lng: f64,
+}
+
+#[derive(Deserialize, Serialize, Debug, Copy, Clone, Default, PartialEq)]
+struct SerializablePointBearing {
+    lat: f64,
+    lng: f64,
+    bearing: f64,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -54,30 +61,47 @@ struct PointBearing {
     bearing: f64,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct MetadataResult {
     distance: f64,
     frames: usize,
-    gpsPoints: Vec<GSVPoint>,
+    gpsPoints: Vec<SerializablePointBearing>,
     originalPoints: Vec<GSVPoint>,
     averageError: f64,
 }
 
-async fn get_images<P: AsRef<Path>>(point_bearings: &[PointBearing], out_dir: &P) {
-    let url = |point_bearing: &PointBearing| {
+impl SerializablePointBearing {
+    fn from_geo(pb: &PointBearing) -> SerializablePointBearing {
+        SerializablePointBearing {
+            bearing: pb.bearing,
+            lat: pb.point.lat(),
+            lng: pb.point.lng(),
+        }
+    }
+}
+
+/// For each input point_bearing, request the streetview image from Google's static API.
+/// Save each image as {index}.jpg within out_dir.
+async fn get_images<P: AsRef<Path>>(point_bearings: &[SerializablePointBearing], out_dir: &P) {
+    let url = |point_bearing: &SerializablePointBearing| {
         format!(
-"https://maps.googleapis.com/maps/api/streetview?size=640x480&location={},{}&fov=100&source=outdoor&heading={}&pitch=0&key={}", point_bearing.point.lat(), point_bearing.point.lng(), point_bearing.bearing, CLI_OPTIONS.api_key)
+"https://maps.googleapis.com/maps/api/streetview?size=640x480&location={},{}&fov=100&source=outdoor&heading={}&pitch=0&key={}", point_bearing.lat, point_bearing.lng, point_bearing.bearing, CLI_OPTIONS.api_key)
     };
     let client = Client::new();
-    let bodies = stream::iter(point_bearings.iter().map(url).enumerate())
-        .map(|(index, url)| {
-            let client = &client;
-            async move {
-                let resp = client.get(&url).send().await;
-                (index, resp.unwrap().bytes().await)
-            }
-        })
-        .buffer_unordered(CLI_OPTIONS.network_concurrency.unwrap_or(40));
+    let bodies = stream::iter(
+        point_bearings
+            .iter()
+            .map(url)
+            .enumerate(),
+    )
+    .map(|(index, url)| {
+        let client = &client;
+        async move {
+            let resp = client.get(&url).send().await;
+            (index, resp.unwrap().bytes().await)
+        }
+    })
+    .buffer_unordered(CLI_OPTIONS.network_concurrency.unwrap_or(40));
 
     bodies
         .for_each(|(index, bytes)| async move {
@@ -87,6 +111,9 @@ async fn get_images<P: AsRef<Path>>(point_bearings: &[PointBearing], out_dir: &P
         .await;
 }
 
+/// For each input point_bearing, request its streetview metadata from Google's static API.
+/// Sends requests in parallel determined by network_concurrency option.
+/// Return array of metadata, one item per input point.
 async fn get_metadata(point_bearings: &[PointBearing]) -> Vec<GSVMetadata> {
     // use metadata requests to skip errors https://developers.google.com/maps/documentation/streetview/metadata
     // and to correct points lat/lng
@@ -128,6 +155,10 @@ async fn get_metadata(point_bearings: &[PointBearing]) -> Vec<GSVMetadata> {
         .collect::<Vec<_>>()
 }
 
+/// Given list of point_bearings and their metadata (expect arrays of same length),
+/// Filter out any points whose metadata is not ok and
+/// Group together all points that share the same panorama location.
+/// Return point_bearings and metadata by selecting the closest point per panorama id.
 fn group_by_location(
     point_bearings: Vec<PointBearing>,
     metadata: Vec<GSVMetadata>,
@@ -173,6 +204,8 @@ fn group_by_location(
     (point_bearings, metadata, errs)
 }
 
+/// Fill *factor* points between each pair of points in input array.
+/// Expect output array to have length of points.len() * factor.
 fn interp_points(points: Vec<Point<f64>>, factor: usize) -> Vec<Point<f64>> {
     if factor < 2 {
         points
@@ -192,6 +225,8 @@ fn interp_points(points: Vec<Point<f64>>, factor: usize) -> Vec<Point<f64>> {
     }
 }
 
+/// Compute distance from each point to the next of input.
+/// Output has length of points.len() - 1.
 fn find_distances(points: &[Point<f64>]) -> Vec<f64> {
     points
         .par_iter()
@@ -271,126 +306,19 @@ fn read_json<R: std::io::Read>(reader: R) -> Vec<Point<f64>> {
         .collect::<Vec<_>>()
 }
 
-#[tokio::main]
-async fn main() {
-    lazy_static::initialize(&CLI_OPTIONS);
-
-    let file = File::open(&CLI_OPTIONS.input_path).unwrap();
-    let reader = BufReader::new(file);
-    let is_gpx = &CLI_OPTIONS.input_path.extension() == &Some(std::ffi::OsStr::new("gpx"));
-
-    progress_stage("Parsing GPX data");
-    progress("Reading GPX file");
-    let original_points = if is_gpx {
-        read_gpx(reader)
-    } else {
-        read_json(reader)
-    };
-    let all_points = original_points.clone();
-
-    progress(&format!(
-        "Computing distance statistics ({} points)",
-        all_points.len()
-    ));
-    let distances = find_distances(&all_points);
-    let distance = distances.iter().sum::<f64>();
-    if !CLI_OPTIONS.json {
-        println!("distance is {} with {} points", distance, all_points.len());
-    }
-
-    let output_dir = CLI_OPTIONS
-        .output_dir
-        .as_ref()
-        .map(|o| PathBuf::from(o))
-        .unwrap_or_else(|| {
-            let start = SystemTime::now();
-            let now = start
-                .duration_since(UNIX_EPOCH)
-                .expect("Time went backwards");
-            env::temp_dir().join(format!("streetwarp-tmp-{}", now.as_secs()))
-        });
-    fs::create_dir_all(&output_dir).expect("Could not open output directory");
-    if !CLI_OPTIONS.json {
-        println!("output dir is {}", output_dir.to_string_lossy());
-    }
-
-    // interpolate extra points to have more closely spaced pictures
-    // from my observation it looks like Google can give back up to 300 points per mile
-    let expected_frames =
-        (CLI_OPTIONS.frames_per_mile.unwrap_or(100.0) * distance / 1600.0) as usize;
-    let all_points = interp_points(
-        all_points,
-        CLI_OPTIONS
-            .interp
-            .unwrap_or(expected_frames / &distances.len() + 1),
-    );
-    let distances = find_distances(&all_points);
-
-    progress("Finding viewpoints");
-    let points = find_bearings(&sample_points_by_distance(
-        &all_points,
-        expected_frames,
-        &distances,
-    ));
-    progress_stage("Fetching Streetview metadata");
-    let metadata = get_metadata(&points).await;
-    progress(&format!(
-        "Found metadata for {} streetview points",
-        metadata.len()
-    ));
-    let (mut points, mut metadata, mut errs) = group_by_location(points, metadata);
-    if CLI_OPTIONS.max_frames.unwrap_or(0) > 0 {
-        metadata.truncate(CLI_OPTIONS.max_frames.unwrap());
-        points.truncate(CLI_OPTIONS.max_frames.unwrap());
-        errs.truncate(CLI_OPTIONS.max_frames.unwrap());
-    }
-
-    if !CLI_OPTIONS.json {
-        println!(
-            "distance is {} with {} points",
-            distances.iter().sum::<f64>(),
-            all_points.len()
-        );
-        println!("filtered to {} points", points.len());
-        println!(
-            "average error is {} meters",
-            errs.iter().sum::<f64>() / errs.len() as f64
-        );
-    }
-    let gps_points = metadata
-        .iter()
-        .map(|data| data.location)
-        .collect::<Vec<_>>();
-
-    let mut metadata_result = MetadataResult {
-        distance: distances.iter().sum::<f64>(),
-        frames: gps_points.len(),
-        averageError: errs.iter().sum::<f64>() / errs.len() as f64,
-        gpsPoints: gps_points,
-        originalPoints: original_points
-            .iter()
-            .map(|p| GSVPoint {
-                lat: p.lat(),
-                lng: p.lng(),
-            })
-            .collect::<Vec<_>>(),
-    };
-    if CLI_OPTIONS.dry_run {
-        if CLI_OPTIONS.json {
-            println!(
-                "{}",
-                serde_json::to_string(&metadata_result).expect("Serialization failed")
-            );
-        } else {
-            println!("{:?}", &metadata_result);
-        }
-        return;
-    }
-
-    get_images(&points, &output_dir).await;
+async fn create_video(output_dir: PathBuf, mut metadata_result: MetadataResult) {
+    // Remove first offset frames from gps points
+    metadata_result.gpsPoints.drain(0..CLI_OPTIONS.offset_frames.unwrap_or(0));
+    // Remove all frames after max frames from gps points
+    metadata_result.gpsPoints.truncate(CLI_OPTIONS.max_frames.unwrap_or(metadata_result.frames));
+    get_images(&metadata_result.gpsPoints, &output_dir).await;
     let dir_size = get_size(&output_dir).unwrap_or(0);
+    let dir_files = get_dir_content(&output_dir)
+        .map(|d| d.files.len())
+        .unwrap_or(0);
     progress(&format!(
-        "Fetched images, output size: {:.2} MB",
+        "Fetched {} images, output size: {:.2} MB",
+        dir_files,
         (dir_size as f64) / 1000000.0
     ));
 
@@ -403,7 +331,7 @@ async fn main() {
             .collect::<Vec<_>>();
         kept_points.len()
     } else {
-        points.len()
+        metadata_result.gpsPoints.len()
     };
 
     if CLI_OPTIONS.print_metadata {
@@ -468,4 +396,125 @@ async fn main() {
         "Created video, total output size: {:.2} MB",
         (dir_size as f64) / 1000000.0
     ));
+}
+
+#[tokio::main]
+async fn main() {
+    lazy_static::initialize(&CLI_OPTIONS);
+
+    let file = File::open(&CLI_OPTIONS.input_path).unwrap();
+    let reader = BufReader::new(file);
+
+    let output_dir = CLI_OPTIONS
+        .output_dir
+        .as_ref()
+        .map(|o| PathBuf::from(o))
+        .unwrap_or_else(|| {
+            let start = SystemTime::now();
+            let now = start
+                .duration_since(UNIX_EPOCH)
+                .expect("Time went backwards");
+            env::temp_dir().join(format!("streetwarp-tmp-{}", now.as_secs()))
+        });
+    fs::create_dir_all(&output_dir).expect("Could not open output directory");
+    if !CLI_OPTIONS.json {
+        println!("output dir is {}", output_dir.to_string_lossy());
+    }
+
+    if CLI_OPTIONS.use_metadata {
+        progress_stage("Parsing metadata");
+        let metadata_result: MetadataResult =
+            serde_json::from_reader(reader).expect("Could not parse submitted metadata result");
+        create_video(output_dir, metadata_result).await;
+        return;
+    }
+
+    let is_gpx = &CLI_OPTIONS.input_path.extension() == &Some(std::ffi::OsStr::new("gpx"));
+
+    progress_stage("Parsing GPX data");
+    progress("Reading GPX file");
+    let original_points = if is_gpx {
+        read_gpx(reader)
+    } else {
+        read_json(reader)
+    };
+    let all_points = original_points.clone();
+
+    progress(&format!(
+        "Computing distance statistics ({} points)",
+        all_points.len()
+    ));
+    let distances = find_distances(&all_points);
+    let distance = distances.iter().sum::<f64>();
+    if !CLI_OPTIONS.json {
+        println!("distance is {} with {} points", distance, all_points.len());
+    }
+
+    // interpolate extra points to have more closely spaced pictures
+    // from my observation it looks like Google can give back up to 300 points per mile
+    let expected_frames =
+        (CLI_OPTIONS.frames_per_mile.unwrap_or(100.0) * distance / 1600.0) as usize;
+    let all_points = interp_points(
+        all_points,
+        CLI_OPTIONS
+            .interp
+            .unwrap_or(expected_frames / &distances.len() + 1),
+    );
+    let distances = find_distances(&all_points);
+
+    progress("Finding viewpoints");
+    let points = find_bearings(&sample_points_by_distance(
+        &all_points,
+        expected_frames,
+        &distances,
+    ));
+    progress_stage("Fetching Streetview metadata");
+    let metadata = get_metadata(&points).await;
+    progress(&format!(
+        "Found metadata for {} streetview points",
+        metadata.len()
+    ));
+    let (mut points, mut metadata, mut errs) = group_by_location(points, metadata);
+
+    if !CLI_OPTIONS.json {
+        println!(
+            "distance is {} with {} points",
+            distances.iter().sum::<f64>(),
+            all_points.len()
+        );
+        println!("filtered to {} points", points.len());
+        println!(
+            "average error is {} meters",
+            errs.iter().sum::<f64>() / errs.len() as f64
+        );
+    }
+
+    let metadata_result = MetadataResult {
+        distance: distances.iter().sum::<f64>(),
+        frames: points.len(),
+        averageError: errs.iter().sum::<f64>() / errs.len() as f64,
+        gpsPoints: points
+            .iter()
+            .map(|pb| SerializablePointBearing::from_geo(pb))
+            .collect::<Vec<_>>(),
+        originalPoints: original_points
+            .iter()
+            .map(|p| GSVPoint {
+                lat: p.lat(),
+                lng: p.lng(),
+            })
+            .collect::<Vec<_>>(),
+    };
+    if CLI_OPTIONS.dry_run {
+        if CLI_OPTIONS.json {
+            println!(
+                "{}",
+                serde_json::to_string(&metadata_result).expect("Serialization failed")
+            );
+        } else {
+            println!("{:?}", &metadata_result);
+        }
+        return;
+    }
+    create_video(output_dir, metadata_result).await;
 }

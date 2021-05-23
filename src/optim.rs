@@ -1,3 +1,4 @@
+use fs_extra::dir::get_dir_content;
 use std::path::Path;
 use tokio::process::Command;
 
@@ -9,10 +10,10 @@ pub async fn optimize_sequence<P: AsRef<Path>>(image_dir: &P) -> Vec<usize> {
     let mut args = vec![image_dir
         .as_ref()
         .to_str()
-        .expect("Could not turn stringify image_dir")
+        .expect("Could not stringify image_dir")
         .to_string()];
     if let Some(arg) = CLI_OPTIONS.optimizer_arg.clone() {
-       args.push(arg) 
+        args.push(arg)
     }
     let mut command = Command::new(optimizer_cmd);
     let command = command.args(args);
@@ -36,8 +37,20 @@ pub async fn optimize_sequence<P: AsRef<Path>>(image_dir: &P) -> Vec<usize> {
             let from_filename = image_dir.as_ref().join(format!("{}.jpg", &from));
             let to_filename = image_dir.as_ref().join(format!("{}.opt.jpg", &to));
             let res = tokio::fs::rename(&from_filename, &to_filename).await;
+            if !res.is_ok() {
+                let dir_files = get_dir_content(&image_dir)
+                    .expect(&format!(
+                        "Could not get contents of {:?}",
+                        image_dir.as_ref()
+                    ))
+                    .files;
+                eprintln!(
+                    "file operation error detected, current folder contents are {:?}",
+                    &dir_files
+                );
+            }
             res.expect(&format!(
-                "Could not copy {:?} to {:?}",
+                "Could not move {:?} to {:?}",
                 &from_filename, &to_filename
             ));
         })

@@ -29,4 +29,3 @@ pub fn progress_stage(stage: &str) {
         .expect("Could not print progress message")
     );
 }
-
