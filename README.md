@@ -21,3 +21,6 @@ To **avoid hitting your API quota**, pass in the `--dry-run` option!
 `cargo run -- --help`
 
 Included in this repo are some gpx files you can use to play around with.
+
+### Demo
+I provide this program's functionality as a free service at [streetwarp.com](https://streetwarp.com).
