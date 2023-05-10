@@ -88,20 +88,15 @@ async fn get_images<P: AsRef<Path>>(point_bearings: &[SerializablePointBearing],
 "https://maps.googleapis.com/maps/api/streetview?size=640x480&location={},{}&fov=100&source=outdoor&heading={}&pitch=0&key={}", point_bearing.lat, point_bearing.lng, point_bearing.bearing, CLI_OPTIONS.api_key)
     };
     let client = Client::new();
-    let bodies = stream::iter(
-        point_bearings
-            .iter()
-            .map(url)
-            .enumerate(),
-    )
-    .map(|(index, url)| {
-        let client = &client;
-        async move {
-            let resp = client.get(&url).send().await;
-            (index, resp.unwrap().bytes().await)
-        }
-    })
-    .buffer_unordered(CLI_OPTIONS.network_concurrency.unwrap_or(40));
+    let bodies = stream::iter(point_bearings.iter().map(url).enumerate())
+        .map(|(index, url)| {
+            let client = &client;
+            async move {
+                let resp = client.get(&url).send().await;
+                (index, resp.unwrap().bytes().await)
+            }
+        })
+        .buffer_unordered(CLI_OPTIONS.network_concurrency.unwrap_or(40));
 
     bodies
         .for_each(|(index, bytes)| async move {
@@ -123,6 +118,8 @@ async fn get_metadata(point_bearings: &[PointBearing]) -> Vec<GSVMetadata> {
 "https://maps.googleapis.com/maps/api/streetview/metadata?location={},{}&source=outdoor&key={}", point_bearing.point.lat(), point_bearing.point.lng(), CLI_OPTIONS.api_key)
     };
     let client = Client::new();
+    let total_request_count = point_bearings.len();
+    let mut requests_completed = 0;
     let bodies = stream::iter(point_bearings.iter().map(url).enumerate())
         .map(|(index, url)| {
             let client = &client;
@@ -135,6 +132,7 @@ async fn get_metadata(point_bearings: &[PointBearing]) -> Vec<GSVMetadata> {
                         resp.status()
                     );
                 }
+                requests_completed += 1;
                 (index, resp.bytes().await)
             }
         })
@@ -142,6 +140,12 @@ async fn get_metadata(point_bearings: &[PointBearing]) -> Vec<GSVMetadata> {
 
     let mut indexed_metadata = bodies
         .map(|(index, bytes)| {
+            // Print progress message with requests completed / total requests as percentage
+            let percent = (requests_completed as f64 / total_request_count as f64) * 100.0;
+            progress(&format!(
+                "Progress: {:.1}% ({}/{})",
+                percent, requests_completed, total_request_count
+            ));
             let parsed = serde_json::from_slice::<GSVMetadata>(&bytes.unwrap())
                 .expect("Could not parse GSV metadata");
             (index, parsed)
@@ -308,9 +312,13 @@ fn read_json<R: std::io::Read>(reader: R) -> Vec<Point<f64>> {
 
 async fn create_video(output_dir: PathBuf, mut metadata_result: MetadataResult) {
     // Remove first offset frames from gps points
-    metadata_result.gpsPoints.drain(0..CLI_OPTIONS.offset_frames.unwrap_or(0));
+    metadata_result
+        .gpsPoints
+        .drain(0..CLI_OPTIONS.offset_frames.unwrap_or(0));
     // Remove all frames after max frames from gps points
-    metadata_result.gpsPoints.truncate(CLI_OPTIONS.max_frames.unwrap_or(metadata_result.frames));
+    metadata_result
+        .gpsPoints
+        .truncate(CLI_OPTIONS.max_frames.unwrap_or(metadata_result.frames));
     get_images(&metadata_result.gpsPoints, &output_dir).await;
     let dir_size = get_size(&output_dir).unwrap_or(0);
     let dir_files = get_dir_content(&output_dir)
@@ -440,7 +448,7 @@ async fn main() {
     };
     let all_points = original_points.clone();
 
-    progress(&format!(
+    progress_stage(&format!(
         "Computing distance statistics ({} points)",
         all_points.len()
     ));
@@ -462,7 +470,7 @@ async fn main() {
     );
     let distances = find_distances(&all_points);
 
-    progress("Finding viewpoints");
+    progress_stage("Finding viewpoints");
     let points = find_bearings(&sample_points_by_distance(
         &all_points,
         expected_frames,
@@ -470,7 +478,7 @@ async fn main() {
     ));
     progress_stage("Fetching Streetview metadata");
     let metadata = get_metadata(&points).await;
-    progress(&format!(
+    progress_stage(&format!(
         "Found metadata for {} streetview points",
         metadata.len()
     ));
