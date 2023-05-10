@@ -14,15 +14,18 @@ pub fn progress(msg: &str) {
         return;
     }
     // If last progress time + debounce < current time, then skip
-    let mut last_progress_time = LAST_PROGRESS_TIME.lock().unwrap();
-    let current_time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    if *last_progress_time + PROGRESS_DEBOUNCE_MS > current_time {
-        return;
+    {
+        // Start new context so we can drop the lock before printing
+        let mut last_progress_time = LAST_PROGRESS_TIME.lock().unwrap();
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        if *last_progress_time + PROGRESS_DEBOUNCE_MS > current_time {
+            return;
+        }
+        *last_progress_time = current_time;
     }
-    *last_progress_time = current_time;
     println!(
         "{}",
         serde_json::to_string(&json!({
@@ -37,9 +40,11 @@ pub fn progress_stage(stage: &str) {
     if !CLI_OPTIONS.progress {
         return;
     }
-    // Reset the last progress time to 0
-    let mut last_progress_time = LAST_PROGRESS_TIME.lock().unwrap();
-    *last_progress_time = 0;
+    {
+        // Reset the last progress time to 0
+        let mut last_progress_time = LAST_PROGRESS_TIME.lock().unwrap();
+        *last_progress_time = 0;
+    }
     println!(
         "{}",
         serde_json::to_string(&json!({

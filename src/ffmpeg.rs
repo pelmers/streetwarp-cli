@@ -13,6 +13,8 @@ pub async fn ffmpeg<P: AsRef<Path>>(working_dir: P, get_progress: &GetProgress, 
         .args(args)
         .current_dir(working_dir)
         .stdout(Stdio::piped());
+    // Print arguments list to stderr
+    eprintln!("ffmpeg {}", args.join(" "));
     let mut child = command.spawn().expect("ffmpeg spawn failure");
     let stdout = child.stdout.take().expect("ffmpeg stdout failure");
     let mut reader = tokio::io::BufReader::new(stdout).lines();
@@ -54,11 +56,11 @@ pub async fn create_timelapse<P: AsRef<Path>>(image_dir: P, num_images: usize, o
             "-c:v",
             "libx264",
             "-crf",
-            "24",
+            "22",
             "-pix_fmt",
             "yuv420p",
             "-preset",
-            "veryfast",
+            "faster",
             "-movflags",
             "faststart",
             "-progress",
@@ -90,11 +92,11 @@ pub async fn blend_timelapse<P: AsRef<Path>>(
             "-c:v",
             "libx264",
             "-crf",
-            "24",
+            "22",
             "-pix_fmt",
             "yuv420p",
             "-preset",
-            "veryfast",
+            "faster",
             "-movflags",
             "faststart",
             "-progress",
@@ -124,11 +126,11 @@ pub async fn minterp_timelapse<P: AsRef<Path>>(
             "-c:v",
             "libx264",
             "-crf",
-            "24",
+            "22",
             "-pix_fmt",
             "yuv420p",
             "-preset",
-            "veryfast",
+            "faster",
             "-movflags",
             "faststart",
             "-progress",

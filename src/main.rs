@@ -87,6 +87,8 @@ async fn get_images<P: AsRef<Path>>(point_bearings: &[SerializablePointBearing],
         format!(
 "https://maps.googleapis.com/maps/api/streetview?size=640x480&location={},{}&fov=100&source=outdoor&heading={}&pitch=0&key={}", point_bearing.lat, point_bearing.lng, point_bearing.bearing, CLI_OPTIONS.api_key)
     };
+    let total_requests = point_bearings.len();
+    let mut requests_completed = 0;
     let client = Client::new();
     let bodies = stream::iter(point_bearings.iter().map(url).enumerate())
         .map(|(index, url)| {
@@ -99,11 +101,23 @@ async fn get_images<P: AsRef<Path>>(point_bearings: &[SerializablePointBearing],
         .buffer_unordered(CLI_OPTIONS.network_concurrency.unwrap_or(40));
 
     bodies
+        .map(|(index, bytes)| {
+            requests_completed += 1;
+            progress(&format!(
+                "Progress: {:.1}% ({}/{})",
+                (requests_completed as f64 / total_requests as f64) * 100.0,
+                requests_completed,
+                total_requests
+            ));
+            (index, bytes)
+        })
         .for_each(|(index, bytes)| async move {
             let filename = out_dir.as_ref().join(format!("{}.jpg", &index));
             tokio::fs::write(filename, bytes.unwrap()).await.unwrap();
         })
         .await;
+    // TODO: check that the images are all in fact jpg, and not an error message (which is png)
+    // TODO: if we see a png image, then convert it to jpg
 }
 
 /// For each input point_bearing, request its streetview metadata from Google's static API.
@@ -132,7 +146,6 @@ async fn get_metadata(point_bearings: &[PointBearing]) -> Vec<GSVMetadata> {
                         resp.status()
                     );
                 }
-                requests_completed += 1;
                 (index, resp.bytes().await)
             }
         })
@@ -140,6 +153,7 @@ async fn get_metadata(point_bearings: &[PointBearing]) -> Vec<GSVMetadata> {
 
     let mut indexed_metadata = bodies
         .map(|(index, bytes)| {
+            requests_completed += 1;
             // Print progress message with requests completed / total requests as percentage
             let percent = (requests_completed as f64 / total_request_count as f64) * 100.0;
             progress(&format!(
@@ -319,6 +333,7 @@ async fn create_video(output_dir: PathBuf, mut metadata_result: MetadataResult) 
     metadata_result
         .gpsPoints
         .truncate(CLI_OPTIONS.max_frames.unwrap_or(metadata_result.frames));
+    progress_stage("Fetching images from Streetview");
     get_images(&metadata_result.gpsPoints, &output_dir).await;
     let dir_size = get_size(&output_dir).unwrap_or(0);
     let dir_files = get_dir_content(&output_dir)
