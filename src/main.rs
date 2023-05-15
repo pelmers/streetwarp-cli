@@ -34,10 +34,24 @@ struct GSVPoint {
 }
 
 #[derive(Deserialize, Serialize, Debug, Copy, Clone, Default, PartialEq)]
+struct GPXPoint {
+    lat: f64,
+    lng: f64,
+    ele: Option<f64>,
+}
+
+struct ReadResult {
+    points: Vec<GPXPoint>,
+    name: Option<String>,
+    size: u64,
+}
+
+#[derive(Deserialize, Serialize, Debug, Copy, Clone, Default, PartialEq)]
 struct SerializablePointBearing {
     lat: f64,
     lng: f64,
     bearing: f64,
+    ele: Option<f64>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -57,7 +71,7 @@ struct GSVMetadata {
 
 #[derive(Debug, Clone, Copy)]
 struct PointBearing {
-    point: Point<f64>,
+    point: GPXPoint,
     bearing: f64,
 }
 
@@ -66,17 +80,26 @@ struct MetadataResult {
     distance: f64,
     frames: usize,
     gpsPoints: Vec<SerializablePointBearing>,
-    originalPoints: Vec<GSVPoint>,
+    originalPoints: Vec<GPXPoint>,
     averageError: f64,
+    name: String,
+    fileSizeBytes: u64,
 }
 
 impl SerializablePointBearing {
     fn from_geo(pb: &PointBearing) -> SerializablePointBearing {
         SerializablePointBearing {
             bearing: pb.bearing,
-            lat: pb.point.lat(),
-            lng: pb.point.lng(),
+            lat: pb.point.lat,
+            lng: pb.point.lng,
+            ele: pb.point.ele,
         }
+    }
+}
+
+impl GPXPoint {
+    fn to_geo_point(&self) -> Point<f64> {
+        Point::new(self.lng, self.lat)
     }
 }
 
@@ -129,7 +152,7 @@ async fn get_metadata(point_bearings: &[PointBearing]) -> Vec<GSVMetadata> {
     // and to skip images that are a copy of the previous one
     let url = |point_bearing: &PointBearing| {
         format!(
-"https://maps.googleapis.com/maps/api/streetview/metadata?location={},{}&source=outdoor&key={}", point_bearing.point.lat(), point_bearing.point.lng(), CLI_OPTIONS.api_key)
+"https://maps.googleapis.com/maps/api/streetview/metadata?location={},{}&source=outdoor&key={}", point_bearing.point.lat, point_bearing.point.lng, CLI_OPTIONS.api_key)
     };
     let client = Client::new();
     let total_request_count = point_bearings.len();
@@ -180,7 +203,7 @@ async fn get_metadata(point_bearings: &[PointBearing]) -> Vec<GSVMetadata> {
 fn group_by_location(
     point_bearings: Vec<PointBearing>,
     metadata: Vec<GSVMetadata>,
-) -> (Vec<PointBearing>, Vec<GSVMetadata>, Vec<f64>) {
+) -> (Vec<PointBearing>, Vec<f64>) {
     let mut grouped_points = vec![vec![]];
     let mut last_pano = None;
     for (point_bearing, meta) in
@@ -200,7 +223,7 @@ fn group_by_location(
                 grouped_points.push(vec![]);
             }
         }
-        let actual_point = point_bearing.point;
+        let actual_point = point_bearing.point.to_geo_point();
         let pano_point = Point::new(meta.location.lng, meta.location.lat);
         let err = actual_point.geodesic_distance(&pano_point);
         let groups = grouped_points.len();
@@ -218,26 +241,38 @@ fn group_by_location(
         })
         .collect::<Vec<_>>();
     let errs = best_groups.iter().map(|(_, _, e)| *e).collect::<Vec<_>>();
-    let (point_bearings, metadata) = best_groups.into_iter().map(|(p, m, _)| (p, m)).unzip();
-    (point_bearings, metadata, errs)
+    let point_bearings = best_groups.into_iter().map(|(p, _, _)| p).collect::<Vec<_>>();
+    (point_bearings, errs)
 }
 
 /// Fill *factor* points between each pair of points in input array.
 /// Expect output array to have length of points.len() * factor.
-fn interp_points(points: Vec<Point<f64>>, factor: usize) -> Vec<Point<f64>> {
+fn interp_points(points: Vec<GPXPoint>, factor: usize) -> Vec<GPXPoint> {
     if factor < 2 {
         points
     } else {
         points
             .iter()
             .zip(points.iter().skip(1))
-            .flat_map(|(p1, p2)| {
-                p1.haversine_intermediate_fill(
-                    p2,
-                    p1.haversine_distance(p2) / (factor as f64),
-                    /* include ends */ false,
-                )
-                .into_iter()
+            .flat_map(move |(p1, p2)| {
+                let p1geo = p1.to_geo_point();
+                let p2geo = p2.to_geo_point();
+                p1geo
+                    .haversine_intermediate_fill(
+                        &p2geo,
+                        p1geo.haversine_distance(&p2geo) / (factor as f64),
+                        /* include ends */ false,
+                    )
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(i, p)| GPXPoint {
+                        lat: p.lat(),
+                        lng: p.lng(),
+                        // Also interp the elevation if given at both endpoints
+                        ele: p1.ele.and_then(|e1| {
+                            p2.ele.map(|e2| e1 + (e2 - e1) * (i as f64 / factor as f64))
+                        }),
+                    })
             })
             .collect::<Vec<_>>()
     }
@@ -245,19 +280,15 @@ fn interp_points(points: Vec<Point<f64>>, factor: usize) -> Vec<Point<f64>> {
 
 /// Compute distance from each point to the next of input.
 /// Output has length of points.len() - 1.
-fn find_distances(points: &[Point<f64>]) -> Vec<f64> {
+fn find_distances(points: &[GPXPoint]) -> Vec<f64> {
     points
         .par_iter()
         .zip(points.par_iter().skip(1))
-        .map(|(p1, p2)| p1.geodesic_distance(p2))
+        .map(|(p1, p2)| get_distance(p1, p2))
         .collect()
 }
 
-fn sample_points_by_distance(
-    points: &[Point<f64>],
-    n: usize,
-    distances: &[f64],
-) -> Vec<Point<f64>> {
+fn sample_points_by_distance(points: &[GPXPoint], n: usize, distances: &[f64]) -> Vec<GPXPoint> {
     let total_dist: f64 = distances.iter().sum();
     let step = total_dist / (n as f64 - 0.99);
     let mut current = 0.0;
@@ -276,13 +307,25 @@ fn sample_points_by_distance(
     sample
 }
 
-fn find_bearings(points: &[Point<f64>]) -> Vec<PointBearing> {
+fn get_bearing(point1: &GPXPoint, point2: &GPXPoint) -> f64 {
+    let p1 = point1.to_geo_point();
+    let p2 = point2.to_geo_point();
+    p1.bearing(p2)
+}
+
+fn get_distance(point1: &GPXPoint, point2: &GPXPoint) -> f64 {
+    let p1 = point1.to_geo_point();
+    let p2 = point2.to_geo_point();
+    p1.geodesic_distance(&p2)
+}
+
+fn find_bearings(points: &[GPXPoint]) -> Vec<PointBearing> {
     let mut results = points
         .par_iter()
         .zip(points.par_iter().skip(1))
         .map(|(p1, p2)| PointBearing {
             point: *p1,
-            bearing: p1.bearing(*p2),
+            bearing: get_bearing(p1, p2),
         })
         .collect::<Vec<_>>();
     // Assume the direction of the second-to-last point continues to the end.
@@ -295,33 +338,27 @@ fn find_bearings(points: &[Point<f64>]) -> Vec<PointBearing> {
     results
 }
 
-fn read_gpx<R: std::io::Read>(reader: R) -> Vec<Point<f64>> {
+fn read_gpx<R: std::io::Read>(reader: R) -> ReadResult {
     let gpx: Gpx = read(reader).expect("Could not read gpx");
-    gpx.tracks
-        .par_iter()
-        .map(|track| {
-            track
-                .segments
-                .par_iter()
-                .map(|segment| {
-                    segment.points.par_iter().map(|p| {
-                        let val = p.point();
-                        Point::new(val.lng(), val.lat())
-                    })
-                })
-                .flatten()
-        })
-        .flatten()
-        .collect::<Vec<_>>()
-}
-
-fn read_json<R: std::io::Read>(reader: R) -> Vec<Point<f64>> {
-    let points: Vec<GSVPoint> =
-        serde_json::from_reader(reader).expect("Could not parse json input");
-    points
+    let points = gpx
+        .tracks
         .into_iter()
-        .map(|gsv| Point::new(gsv.lng, gsv.lat))
-        .collect::<Vec<_>>()
+        .flat_map(|t| t.segments.into_iter().map(|s| s.points.into_iter()))
+        .flatten()
+        .into_iter()
+        .map(|p| GPXPoint {
+            lat: p.point().lat(),
+            lng: p.point().lng(),
+            ele: p.elevation,
+        })
+        .collect::<Vec<_>>();
+    // Estimate each point is about 32 bytes
+    let size = (points.len() * 32) as u64;
+    ReadResult {
+        points: points,
+        name: gpx.metadata.and_then(|m| m.name),
+        size: size,
+    }
 }
 
 async fn create_video(output_dir: PathBuf, mut metadata_result: MetadataResult) {
@@ -452,15 +489,10 @@ async fn main() {
         return;
     }
 
-    let is_gpx = &CLI_OPTIONS.input_path.extension() == &Some(std::ffi::OsStr::new("gpx"));
-
     progress_stage("Parsing GPX data");
     progress("Reading GPX file");
-    let original_points = if is_gpx {
-        read_gpx(reader)
-    } else {
-        read_json(reader)
-    };
+    let read_result = read_gpx(reader);
+    let original_points = read_result.points;
     let all_points = original_points.clone();
 
     progress_stage(&format!(
@@ -497,7 +529,7 @@ async fn main() {
         "Found metadata for {} streetview points",
         metadata.len()
     ));
-    let (mut points, mut metadata, mut errs) = group_by_location(points, metadata);
+    let (points, errs) = group_by_location(points, metadata);
 
     if !CLI_OPTIONS.json {
         println!(
@@ -520,13 +552,9 @@ async fn main() {
             .iter()
             .map(|pb| SerializablePointBearing::from_geo(pb))
             .collect::<Vec<_>>(),
-        originalPoints: original_points
-            .iter()
-            .map(|p| GSVPoint {
-                lat: p.lat(),
-                lng: p.lng(),
-            })
-            .collect::<Vec<_>>(),
+        originalPoints: original_points,
+        name: read_result.name.unwrap_or("Unnamed GPX File".to_owned()),
+        fileSizeBytes: read_result.size,
     };
     if CLI_OPTIONS.dry_run {
         if CLI_OPTIONS.json {

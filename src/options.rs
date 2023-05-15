@@ -3,7 +3,7 @@ use structopt::StructOpt;
 
 #[derive(StructOpt)]
 pub struct Cli {
-    /// The path to the file to read, accepts .gpx and .json (format: [{lat, lng}]) files
+    /// The path to the file to read, accepts .gpx and .json (format: metadata result) files
     #[structopt(parse(from_os_str))]
     pub input_path: PathBuf,
 
