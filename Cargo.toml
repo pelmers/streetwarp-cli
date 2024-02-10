@@ -5,7 +5,7 @@ authors = ["Peter Elmers <peter.elmers@yahoo.com>"]
 edition = "2018"
 
 [dependencies]
-gpx = "^0.8"
+gpx = "0.10.0"
 geo = "^0.14"
 structopt = "0.3.16"
 tokio = { version ="0.2.22", features =["full"] }
